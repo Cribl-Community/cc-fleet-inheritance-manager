@@ -1,287 +1,256 @@
 # Fleet Inheritance Manager
 
-[One-sentence summary of what this app does.]
-
-This README uses fixed section names and a fixed metadata table so it can be rendered as normal Markdown today and parsed into App Gallery components later.
+A Cribl App for visualizing and managing fleet pack inheritance relationships.
 
 ## Summary
 
-[App Title] is a Cribl app for [primary use case]. It helps users [outcome 1], [outcome 2], and [outcome 3].
-
-Use this section for the short, customer-facing description that should also work in an overview card or detail page.
+Fleet Inheritance Manager helps Cribl Stream administrators understand how packs are inherited across their fleet infrastructure. It provides clear visibility into which packs are deployed to which fleets, and what knowledge objects (pipelines, routes, functions, etc.) are contained within those packs.
 
 ## What This App Does
 
-Describe the app in plain language.
+Provide visibility into pack inheritance across Fleets and help administrators understand which packs and knowledge objects are inherited by each Fleet.
 
-Suggested structure:
-* Primary purpose: [brief description]
-* Key capabilities:
-  * [Capability 1]
-  * [Capability 2]
-  * [Capability 3]
-* Intended users:
-  * [Admin / Analyst / Platform owner / Builder / Other]
-* Works with:
-  * [Stream / Edge / Search / Lake / Cribl.Cloud / Hybrid / Other]
+### Key capabilities
+
+- **Fleet Inventory View** — Display all configured fleets with detailed metadata
+- **Pack Explorer** — Browse all available packs with version, author, and tag information
+- **Inheritance Hierarchy** — Visualize the complete inheritance chain from Fleets → Packs → Knowledge Objects
+- **Search and Filter** — Quickly find specific fleets or packs across your environment
+- **Knowledge Object Catalog** — View all functions, pipelines, routes, and other knowledge objects within each pack
+
+### Intended users
+
+- Stream Administrators
+- Platform Owners
+- Operations Teams
+- Architects
+
+### Works with
+
+- Cribl Stream (4.18.0+)
 
 ## When To Use This App
 
-List the main scenarios where this app is useful.
+Use Fleet Inheritance Manager when you need to:
 
-* [Use case 1]
-* [Use case 2]
-* [Use case 3]
+- Understand which packs are deployed to which fleets
+- Determine the scope of a pack update or deletion
+- Plan changes to fleet configuration
+- Audit pack dependencies and relationships
+- Document pack inheritance for compliance
 
 ## Before You Install
 
-List anything a user or admin should know before installation.
+### Requirements
 
-* Required Cribl product or deployment type: [for example Cribl.Cloud, hybrid, distributed group]
-* Required permissions or roles: [list roles or permissions]
-* Required external systems or APIs: [if any]
-* Required configuration values: [API endpoint, dataset, token source, workspace selection, and so on]
-* Known limits or prerequisites: [quota, feature flag, environment requirements]
+- **Required Cribl product**: Cribl Stream 4.18.0 or later
+- **Required permissions**: Read-only access to groups, packs, and knowledge objects
+- **Supported deployment types**: Leader/standalone deployments
+
+### No external systems or APIs required
+
+This app only communicates with your local Cribl Stream instance via documented APIs.
 
 ## Installation
 
-Use Marketplace installation as the default path whenever the app is available there. This gives users the easiest install path and makes future upgrades simpler.
+### Install From Marketplace (Recommended)
 
-### Install From Marketplace or URL
-1. Go to Apps in your Cribl environment.
-2. Choose the Marketplace or import from URL option.
-3. If the app is available in the Cribl Marketplace, install it directly from there.
-4. If the app is distributed as a Marketplace-hosted URL, use the URL to import it.
-5. Review the app details and complete installation.
+1. Go to **Apps** in your Cribl Stream Leader or standalone deployment
+2. Select **Marketplace**
+3. Search for "Fleet Inheritance Manager"
+4. Click **Install** and complete setup
 
-Why this is the preferred path:
-* Simplest user experience
-* Easier to adopt future releases
-* Cleaner upgrade path when newer versions are published
+### If Not In Marketplace
 
-### If The App Is Not Yet In The Cribl Marketplace
-1. Go to the app's GitHub repository.
-2. Open the Releases section.
-3. Download the `.tgz` app package for the version you want.
-4. In Cribl, go to Apps and choose import from file.
-5. Upload the downloaded `.tgz` file.
-6. Review the app details and complete installation.
-
-Use this path when the app has not yet been published to the Cribl Marketplace or when you need to install a specific release artifact manually.
+1. Visit the GitHub releases page
+2. Download the latest `.tgz` file
+3. In Cribl, go to **Apps** → **Import from file**
+4. Upload the `.tgz` and complete installation
 
 ## Configuration
 
-Explain exactly what a user needs to fill in when the app is first created or configured.
+This app is **read-only** and requires no configuration after installation. Simply install and open it to begin exploring your fleet inheritance.
 
 | Setting | Required | Description | Example | Scope |
 |---|---|---|---|---|
-| [Setting name] | Yes/No | [What this field is for] | [Example value] | [per-user, per-app, shared] |
-| [Setting name] | Yes/No | [What this field is for] | [Example value] | [per-user, per-app, shared] |
-| [Setting name] | Yes/No | [What this field is for] | [Example value] | [per-user, per-app, shared] |
-
-Add guidance such as:
-* Which fields are mandatory
-* Which fields are optional
-* Safe defaults
-* What happens if a field is left blank
-* Whether settings are per-user, per-app, or shared
+| None | N/A | This app requires no per-user or per-app configuration. | N/A | N/A |
 
 ## How To Use
 
-Describe the happy path for a new user.
-
 ### Typical Workflow
-1. Open the app from the Apps page.
-2. Review or update the app settings.
-3. Provide the required inputs.
-4. Run the main workflow or action.
-5. Review the output, results, or generated state.
+
+1. **Open the app** from the Apps page
+2. **Navigate to Fleets** tab to see all configured fleets
+3. **Select a fleet** to view its details and configuration
+4. **Navigate to Packs** tab to browse all available packs
+5. **Navigate to Inheritance** tab to visualize the complete pack inheritance hierarchy
+6. **Use search and filters** to find specific fleets or packs
 
 ### First-Run Checklist
-* [Step 1]
-* [Step 2]
-* [Step 3]
+
+- [ ] Verify you can see all expected fleets in the **Fleets** tab
+- [ ] Confirm packs are loading in the **Packs** tab
+- [ ] Test the **Inheritance** view by expanding a fleet to see its packs
 
 ## Permissions
 
-Document the permissions the app expects and how it behaves if a user lacks them.
-
-Include:
-* Required permissions for core functionality
-* Optional permissions for enhanced features
-* Any APIs or resources the app reads or writes
-* What users should expect if access is denied
+This app is **read-only**. It does not modify any configuration or data.
 
 ### Cribl API Endpoints Used
 
-List every Cribl API endpoint the app uses. Add one row per endpoint.
-
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/v1/...` | [What the call does and why the app needs it] |
-| POST | `/api/v1/...` | [What the call does and why the app needs it] |
-| PUT | `/api/v1/...` | [What the call does and why the app needs it] |
+| GET | `/products/stream/groups` | List all Fleet Groups |
+| GET | `/products/stream/groups/{id}` | Get Fleet details and pack relationships |
+| GET | `/packs` | List all Packs in the environment |
+| GET | `/packs/{id}` | Get Pack metadata and details |
+| GET | `/p/{pack}/functions` | Get Functions within a Pack |
+| GET | `/p/{pack}/pipelines` | Get Pipelines within a Pack |
+| GET | `/p/{pack}/routes` | Get Routes within a Pack |
 
-Suggested text:
-This app should handle permission differences gracefully where possible. If a user lacks access to an optional API or resource, the app should continue to function for supported workflows and show a helpful message instead of failing completely.
+All calls are read-only (`GET`). No configuration is created, modified, or deleted.
 
 ## External API Access
 
-If applicable, describe any bundled defaults or external access patterns.
+This app makes **no external API calls**. It only communicates with your local Cribl Stream instance.
 
 ### Default Configuration
-* `default/proxies.yml` — [what it contains]
-* `default/policies.yml` — [what it contains]
-* Any other shipped config — [description]
 
-### External Endpoints
-* [Service name] — [purpose]
-* [Service name] — [purpose]
+- No external proxies configured
+- No external domains accessed
 
-If the app makes no external calls, say so clearly.
+## Data and Storage
 
-## Data And Storage
+This app stores **no persistent data**. All information is fetched on-demand from your Cribl Stream instance.
 
-Explain what the app stores or changes.
+- **No KV store usage**
+- **No persistent cache**
+- **No user data collected**
+- **No session data persisted**
 
-Example topics:
-* KV keys used by the app
-* Whether data is persisted
-* Whether data is shared across users
-* Cleanup behavior on uninstall, if known
-* Any quotas or limits that affect usage
+Each time you refresh the app, it fetches current data from your Cribl Stream Leader.
 
 ## Support
 
-Choose one support model and remove the others.
+This app is built by [Author Name/Team] and is community-supported.
 
-Also tell users exactly how to reach the developer or maintainer for this app. Include a clear support path such as an email address, Slack channel, GitHub issues page, support alias, or team name.
-
-### Cribl Built
-This app is built by Cribl and supported by Cribl. Issues, bugs, and questions should follow standard Cribl support channels. Also include the owning team and the best contact path for the app maintainer.
-
-### Partner Built
-This app is built by [Partner Name]. The partner owns support, maintenance, and feature requests for this app. Cribl does not provide direct support for app-specific behavior unless explicitly stated. Also include the partner support contact and the best developer or maintainer contact path.
-
-### Community Built
-This app is provided as a community contribution. It may be useful for learning, experimentation, or shared workflows, but it does not carry an official support commitment from Cribl. Maintenance and updates depend on the community maintainer. Also include how users can reach the maintainer or contributor.
-
-### Internal Only
-This app is intended for internal use, experiments, demos, or proof-of-concept workflows. It should not be treated as a generally supported production app unless its support model changes. Also include the internal owner and how to contact the developer or team responsible for the app.
+For issues, feature requests, or questions:
+- **GitHub Issues**: [Repository URL]/issues
+- **Email**: [Contact Email]
 
 ## Known Limitations
 
-Use this section to set expectations.
-
-* [Limitation 1]
-* [Limitation 2]
-* [Limitation 3]
+- **Knowledge Objects**: Currently displays Functions, Pipelines, and Routes. Other object types may be added in future releases.
+- **Large Environments**: Performance may degrade with very large numbers of fleets (100+) or packs (500+). Pagination/virtualization improvements planned.
+- **Real-time Updates**: The app does not automatically refresh when fleet or pack configuration changes in the leader. Refresh the app to see latest data.
 
 ## Troubleshooting
 
-### The App Opens But Some Features Do Not Work
-Possible causes:
-* Missing permissions
-* Missing required settings
-* External dependency unavailable
-* Unsupported environment
+### The App Opens But Shows No Fleets
 
-### The App Cannot Connect To An API Or Service
-Check:
-* App settings
-* Network or proxy configuration
-* Credentials or tokens
-* Allowed endpoints
+**Possible causes:**
+- No fleets are configured in your Cribl Stream instance
+- Missing permissions to read the `/products/stream/groups` API
 
-### The App Works Locally But Not In Cribl
-Check:
-* Packaging and deployment version
-* Runtime configuration
-* Required platform globals or APIs
-* Environment-specific permissions
+**Solution:**
+- Verify you have a fleet configured in Cribl Stream
+- Check that your user role has read access to groups and fleets
+- Try refreshing the app
+
+### Packs or Knowledge Objects Don't Show
+
+**Possible causes:**
+- Packs not deployed to your environment
+- API timeout on large environments
+- Missing permissions to read pack APIs
+
+**Solution:**
+- Verify packs exist in your Cribl Stream environment
+- Try searching for specific packs instead of loading all
+- Check your user permissions
+
+### The App Won't Load
+
+**Possible causes:**
+- Incompatible Cribl Stream version
+- Browser compatibility issue
+- Missing required permissions
+
+**Solution:**
+- Verify you're running Cribl Stream 4.18.0 or later
+- Try a different browser (Chrome, Firefox, Safari)
+- Check the browser console for error messages
 
 ## Development
 
-If this repository is also intended for builders, include a short developer section.
+To build and develop this app:
 
 ```bash
 npm install
-npm run dev
-npm run package
+npm run dev          # Start dev server with hot reload
+npm run build        # Build for production
+npm run lint         # Run linter
+npm run package      # Create deployable .tgz archive
 ```
 
-Document:
-* How to run locally
-* Any important environment differences
-* How to package and test the app
-* Where the main source files live
+The app is built with:
+- **React 19** for the UI framework
+- **TypeScript 6** for type safety
+- **Vite 8** for fast development and building
+- **Capra Design System** for consistent UI
 
-If your app has backend endpoints (`config/backend.yml` + `backend/`), `npm run build` runs `apps build` to bundle each endpoint into one self-contained file before packaging. Backend endpoint permissions are not declared in `backend.yml`; they use `config/policies.yml` (Cribl API) and `config/proxies.yml` (external egress), app-wide. See `AGENTS.md` for the endpoint contract.
-
-## Project Layout
+### Project Layout
 
 ```text
 src/
-  App.tsx
-  [other files]
-backend/
-  [ESM endpoint handlers — bundled by `apps build`; omit for a frontend-only app]
+  main.tsx           ← Entry point
+  App.tsx            ← Main app component with routing
+  types.ts           ← TypeScript type definitions
+  api.ts             ← Cribl API integration
+  hooks.ts           ← React hooks for data fetching
+  App.css            ← Application styling
+  components/        ← React components
+    FleetsView.tsx       ← Fleet inventory view
+    PacksView.tsx        ← Pack explorer
+    InheritanceView.tsx  ← Hierarchy visualization
+    LoadingState.tsx     ← Loading/empty state UI
+    ErrorBoundary.tsx    ← Error handling
+
 config/
-  backend.yml    [backend endpoint declarations]
-  policies.yml   [Cribl API access grants]
-  proxies.yml    [external domain declarations]
-  schedules.yml  [scheduled backend function declarations]
-  [other config files]
-default/
-  [packaged default config files]
-store/
-  README.md
-LICENSE
-README.md
+  policies.yml       ← Cribl API permissions
+  proxies.yml        ← External domain declarations
 ```
 
-## Versioning And Releases
+## Versioning and Releases
 
-Explain how versions are managed and how users should consume releases.
-
-* Follow semantic versioning
-* Use tagged releases for reproducible installs
-* Document upgrade notes when configuration or behavior changes
+- Versions follow **semantic versioning** (MAJOR.MINOR.PATCH)
+- Releases are tagged in Git
+- Each release includes a `.tgz` package for installation
 
 ## Contributing
 
-If contributions are allowed, add:
-* How to open issues
-* How to propose changes
-* Review expectations
-* Any coding or content standards
+Contributions welcome! Please:
+
+1. Open an issue to discuss proposed changes
+2. Fork and create a feature branch
+3. Submit a pull request with clear description
+4. Ensure tests pass and code is documented
 
 ## License
 
 This app is licensed under the terms in [LICENSE](./LICENSE).
 
-If needed, add one sentence clarifying any third-party dependencies or additional notices.
-
 ## App Metadata
-
-Use this table as the canonical source for gallery fields. Keep the left column labels exactly as written.
 
 | Field | Value |
 |---|---|
-| App Name | [App Title] |
-| App ID | [app-id] |
-| Version | [x.y.z] |
-| Author | [Cribl, Partner Name, Community, or Internal Team] |
-| Support Model | [cribl-built, partner-built, community-built, internal-only] |
-| Support Label | [Cribl Built, Partner Built, Community Built, Internal Only] |
-| Support Contact | [support channel, email, or URL] |
-| License | [SPDX identifier or "See LICENSE"] |
-| License File | [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt) |
-| Product Tags | [stream, edge, search, lake, insights] |
-| Category | [primary category] |
-| Audience | [admin, analyst, platform-owner, builder, end-user] |
-| Availability | [preview, ga, internal, deprecated] |
-| Requires External Access | [yes or no] |
-| Repository | [repository URL if applicable] |
-| Documentation | [docs URL if applicable] |
-| README Schema Version | [1.0] |
+| App Name | Fleet Inheritance Manager |
+| App ID | fleet-inheritance-manager |
+| Version | 1.0.0 |
+| Author | Nate Wood |
+| Support Model | community-built |
+| License | [See LICENSE](./LICENSE) |
+| Product Tags | stream |
+| Category | Administration |
+| Audience | admin, platform-owner |
+| Requires External Access | No |
