@@ -1,17 +1,11 @@
-import { Text } from '@capra/core';
+import { Spinner, Text } from '@capra/core';
 
 export function LoadingState() {
   return (
-    <div style={{ padding: '2rem', textAlign: 'center' }}>
-      <Text variant="body-md">Loading...</Text>
-      <div
-        style={{
-          marginTop: '1rem',
-          display: 'inline-block',
-          animation: 'spin 1s linear infinite',
-        }}
-      >
-        ⟳
+    <div className="panel panel-centered">
+      <Spinner />
+      <div className="panel-copy">
+        <Text variant="body-md-normal">Loading…</Text>
       </div>
     </div>
   );
@@ -19,34 +13,26 @@ export function LoadingState() {
 
 export function EmptyState({ title, description }: { title: string; description?: string }) {
   return (
-    <div style={{ padding: '3rem 2rem', textAlign: 'center' }}>
+    <div className="panel panel-centered">
       <Text as="h3" variant="heading-sm">
         {title}
       </Text>
-      {description && (
-        <Text variant="body-sm" style={{ marginTop: '0.5rem', opacity: 0.7 }}>
-          {description}
-        </Text>
-      )}
+      {description ? (
+        <div className="panel-copy">
+          <Text variant="body-sm-normal" color="secondary">
+            {description}
+          </Text>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 export function SkeletonLoader({ count = 3 }: { count?: number }) {
   return (
-    <div>
+    <div className="skeleton-list" aria-hidden="true">
       {Array.from({ length: count }).map((_, i) => (
-        <div
-          key={i}
-          style={{
-            padding: '1rem',
-            marginBottom: '0.5rem',
-            backgroundColor: 'var(--ds-background-neutral)',
-            borderRadius: '4px',
-            animation: 'pulse 2s infinite',
-            minHeight: '2rem',
-          }}
-        />
+        <div key={i} className="skeleton-block" />
       ))}
     </div>
   );

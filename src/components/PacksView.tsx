@@ -1,180 +1,393 @@
-import { useState, useMemo } from 'react';
-import { Text, TextInput, Chip } from '@capra/core';
-import { usePacks, usePackKnowledgeObjects } from '../hooks';
-import { ErrorState, LoadingState, EmptyState, SkeletonLoader } from './LoadingState';
-import type { Pack } from '../types';
+import { useEffect, useMemo, useState } from 'react';
+import { Text } from '@capra/core';
+import type { KnowledgeObject } from '../types';
+import { useKnowledgeObjectPreview, usePacks, usePackKnowledgeObjects } from '../hooks';
+import { ErrorState } from './ErrorBoundary';
+import { KnowledgeObjectGroups } from './KnowledgeObjectGroups';
+import { EmptyState, SkeletonLoader } from './LoadingState';
+
+const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route', 'function'] as const;
+type KnowledgeObjectTypeFilter = (typeof KNOWLEDGE_OBJECT_TYPES)[number];
+
+type KnowledgeObjectSortMode = 'name-asc' | 'name-desc';
+
+function sortKnowledgeObjectsByName(
+  knowledgeObjects: KnowledgeObject[],
+  sortMode: KnowledgeObjectSortMode,
+): KnowledgeObject[] {
+  const next = [...knowledgeObjects];
+
+  next.sort((left, right) => left.name.localeCompare(right.name));
+
+  if (sortMode === 'name-desc') {
+    next.reverse();
+  }
+
+  return next;
+}
 
 export function PacksView() {
   const { data: packs, loading, error, retry } = usePacks();
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedPackId, setSelectedPackId] = useState<string | null>(null);
-  const { data: knowledgeObjects, loading: koLoading } = usePackKnowledgeObjects(selectedPackId);
+  const {
+    data: knowledgeObjects,
+    loading: koLoading,
+    error: knowledgeError,
+    retry: retryKnowledge,
+  } = usePackKnowledgeObjects(selectedPackId);
+  const [selectedKnowledgeObject, setSelectedKnowledgeObject] = useState<KnowledgeObject | null>(null);
+  const [knowledgeObjectTypeFilter, setKnowledgeObjectTypeFilter] = useState<KnowledgeObjectTypeFilter>('all');
+  const [knowledgeObjectSortMode, setKnowledgeObjectSortMode] = useState<KnowledgeObjectSortMode>('name-asc');
+  const {
+    data: preview,
+    loading: previewLoading,
+    error: previewError,
+    retry: retryPreview,
+  } = useKnowledgeObjectPreview(selectedPackId, selectedKnowledgeObject);
+
+  const visibleKnowledgeObjects = useMemo(() => {
+    if (!knowledgeObjects) {
+      return [];
+    }
+
+    const filtered = knowledgeObjectTypeFilter === 'all'
+      ? knowledgeObjects
+      : knowledgeObjects.filter((knowledgeObject) => knowledgeObject.type === knowledgeObjectTypeFilter);
+
+    return sortKnowledgeObjectsByName(filtered, knowledgeObjectSortMode);
+  }, [knowledgeObjectSortMode, knowledgeObjectTypeFilter, knowledgeObjects]);
 
   const filteredPacks = useMemo(() => {
-    if (!packs) return [];
-    return packs.filter(pack =>
-      (pack.displayName?.toLowerCase() || '').includes(searchTerm.toLowerCase()) ||
-      (pack.description?.toLowerCase() || '').includes(searchTerm.toLowerCase()) ||
-      (pack.tags?.some(tag => tag.toLowerCase().includes(searchTerm.toLowerCase())) || false)
-    );
+    if (!packs) {
+      return [];
+    }
+
+    const query = searchTerm.trim().toLowerCase();
+
+    return packs.filter((pack) => {
+      if (!query) {
+        return true;
+      }
+
+      return (
+        (pack.displayName ?? '').toLowerCase().includes(query) ||
+        (pack.description ?? '').toLowerCase().includes(query) ||
+        pack.id.toLowerCase().includes(query) ||
+        (pack.tags?.some((tag) => tag.toLowerCase().includes(query)) ?? false)
+      );
+    });
   }, [packs, searchTerm]);
 
   const selectedPack = packs?.find(p => p.id === selectedPackId);
 
-  if (loading) return <SkeletonLoader count={5} />;
-  if (error) return <ErrorState error={error} onRetry={retry} />;
+  useEffect(() => {
+    setSelectedKnowledgeObject(null);
+  }, [selectedPackId]);
+
+  useEffect(() => {
+    if (
+      selectedKnowledgeObject &&
+      !visibleKnowledgeObjects.some(
+        (knowledgeObject) =>
+          knowledgeObject.type === selectedKnowledgeObject.type &&
+          knowledgeObject.id === selectedKnowledgeObject.id,
+      )
+    ) {
+      setSelectedKnowledgeObject(null);
+    }
+  }, [selectedKnowledgeObject, visibleKnowledgeObjects]);
+
+  if (loading) {
+    return <SkeletonLoader count={5} />;
+  }
+
+  if (error) {
+    return <ErrorState error={error} onRetry={retry} />;
+  }
+
   if (!packs || packs.length === 0) {
-    return <EmptyState title="No Packs Found" description="No packs are available in this environment." />;
+    return (
+      <EmptyState
+        title="No packs found"
+        description="No packs are currently visible for this Cribl environment."
+      />
+    );
   }
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2rem' }}>
-      <div>
-        <Text as="h2" variant="heading">
-          Packs
-        </Text>
-        <TextInput
-          placeholder="Search packs..."
+    <section className="split-layout">
+      <div className="panel">
+        <div className="section-header">
+          <Text as="h2" variant="heading-md">
+            Packs
+          </Text>
+          <div className="section-copy">
+            <Text variant="body-sm-normal" color="secondary">
+              Browse pack metadata and inspect the objects each pack contains.
+            </Text>
+          </div>
+        </div>
+
+        <input
+          className="search-input"
+          type="search"
+          placeholder="Search packs"
           value={searchTerm}
-          onChange={e => setSearchTerm(e.target.value)}
-          style={{ marginBottom: '1rem', marginTop: '0.5rem' }}
+          onChange={(event) => setSearchTerm(event.target.value)}
         />
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '60vh', overflowY: 'auto' }}>
-          {filteredPacks.map(pack => (
-            <div
+        <div className="list-stack list-stack-scroll">
+          {filteredPacks.map((pack) => (
+            <button
               key={pack.id}
+              type="button"
+              className={`list-card${selectedPack?.id === pack.id ? ' list-card-selected' : ''}`}
               onClick={() => setSelectedPackId(pack.id)}
-              style={{
-                padding: '1rem',
-                border: selectedPack?.id === pack.id ? '2px solid var(--ds-text-primary)' : '1px solid var(--ds-border-neutral)',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                backgroundColor: selectedPack?.id === pack.id ? 'var(--ds-background-neutral)' : 'transparent',
-              }}
             >
-              <Text variant="body-md-bold">{pack.displayName || pack.id}</Text>
-              {pack.version && (
-                <Text variant="body-sm" style={{ opacity: 0.7 }}>
-                  v{pack.version}
-                </Text>
-              )}
-              {pack.description && (
-                <Text variant="body-sm" style={{ opacity: 0.7, marginTop: '0.25rem' }}>
-                  {pack.description}
-                </Text>
-              )}
-              {pack.tags && pack.tags.length > 0 && (
-                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                  {pack.tags.slice(0, 3).map(tag => (
-                    <Chip key={tag} variant="secondary" size="sm">
-                      {tag}
-                    </Chip>
-                  ))}
-                  {pack.tags.length > 3 && (
-                    <Text variant="body-sm" style={{ opacity: 0.7 }}>
-                      +{pack.tags.length - 3} more
-                    </Text>
-                  )}
+              <div className="list-card-header">
+                <Text variant="body-md-semibold">{pack.displayName || pack.id}</Text>
+                {pack.version ? <span className="pill">v{pack.version}</span> : null}
+              </div>
+              {pack.description ? (
+                <div className="section-copy">
+                  <Text variant="body-sm-normal" color="secondary">
+                    {pack.description}
+                  </Text>
                 </div>
-              )}
-            </div>
+              ) : null}
+              {pack.tags && pack.tags.length > 0 ? (
+                <div className="pill-row">
+                  {pack.tags.slice(0, 4).map((tag) => (
+                    <span key={tag} className="pill pill-subtle">
+                      {tag}
+                    </span>
+                  ))}
+                  {pack.tags.length > 4 ? (
+                    <span className="pill pill-subtle">+{pack.tags.length - 4} more</span>
+                  ) : null}
+                </div>
+              ) : null}
+            </button>
           ))}
         </div>
       </div>
 
-      <div>
+      <div className="panel">
         {selectedPack ? (
-          <div>
-            <Text as="h2" variant="heading">
-              Pack Details
-            </Text>
-            <div style={{ marginTop: '1rem' }}>
-              <div style={{ marginBottom: '1.5rem' }}>
-                <Text variant="body-sm" style={{ opacity: 0.7 }}>
-                  ID
+          <>
+            <div className="section-header">
+              <Text as="h2" variant="heading-md">
+                Pack details
+              </Text>
+              <div className="section-copy">
+                <Text variant="body-sm-normal" color="secondary">
+                  Metadata and knowledge objects for the selected pack.
                 </Text>
-                <Text variant="body-md-bold">{selectedPack.id}</Text>
-              </div>
-
-              {selectedPack.version && (
-                <div style={{ marginBottom: '1.5rem' }}>
-                  <Text variant="body-sm" style={{ opacity: 0.7 }}>
-                    Version
-                  </Text>
-                  <Text variant="body-md">{selectedPack.version}</Text>
-                </div>
-              )}
-
-              {selectedPack.author && (
-                <div style={{ marginBottom: '1.5rem' }}>
-                  <Text variant="body-sm" style={{ opacity: 0.7 }}>
-                    Author
-                  </Text>
-                  <Text variant="body-md">{selectedPack.author}</Text>
-                </div>
-              )}
-
-              {selectedPack.description && (
-                <div style={{ marginBottom: '1.5rem' }}>
-                  <Text variant="body-sm" style={{ opacity: 0.7 }}>
-                    Description
-                  </Text>
-                  <Text variant="body-md">{selectedPack.description}</Text>
-                </div>
-              )}
-
-              {selectedPack.tags && selectedPack.tags.length > 0 && (
-                <div style={{ marginBottom: '1.5rem' }}>
-                  <Text variant="body-sm" style={{ opacity: 0.7 }}>
-                    Tags
-                  </Text>
-                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                    {selectedPack.tags.map(tag => (
-                      <Chip key={tag} variant="secondary">
-                        {tag}
-                      </Chip>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div style={{ marginTop: '2rem', borderTop: '1px solid var(--ds-border-neutral)', paddingTop: '1.5rem' }}>
-                <Text as="h3" variant="heading-sm">
-                  Knowledge Objects
-                </Text>
-                {koLoading ? (
-                  <SkeletonLoader count={3} />
-                ) : knowledgeObjects && knowledgeObjects.length > 0 ? (
-                  <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    {knowledgeObjects.map(ko => (
-                      <div
-                        key={ko.id}
-                        style={{
-                          padding: '0.75rem',
-                          backgroundColor: 'var(--ds-background-neutral)',
-                          borderRadius: '4px',
-                        }}
-                      >
-                        <Text variant="body-sm-bold">{ko.name}</Text>
-                        <Chip variant="secondary" size="sm" style={{ marginTop: '0.25rem' }}>
-                          {ko.type}
-                        </Chip>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <Text variant="body-sm" style={{ opacity: 0.7, marginTop: '0.5rem' }}>
-                    No knowledge objects found
-                  </Text>
-                )}
               </div>
             </div>
-          </div>
+
+            <div className="metadata-grid">
+              <div className="metadata-row">
+                <Text variant="body-xs-semibold" color="secondary">
+                  ID
+                </Text>
+                <Text variant="body-md-normal">{selectedPack.id}</Text>
+              </div>
+              {selectedPack.version ? (
+                <div className="metadata-row">
+                  <Text variant="body-xs-semibold" color="secondary">
+                    Version
+                  </Text>
+                  <Text variant="body-md-normal">{selectedPack.version}</Text>
+                </div>
+              ) : null}
+              {selectedPack.author ? (
+                <div className="metadata-row">
+                  <Text variant="body-xs-semibold" color="secondary">
+                    Author
+                  </Text>
+                  <Text variant="body-md-normal">{selectedPack.author}</Text>
+                </div>
+              ) : null}
+              {selectedPack.description ? (
+                <div className="metadata-row">
+                  <Text variant="body-xs-semibold" color="secondary">
+                    Description
+                  </Text>
+                  <Text variant="body-md-normal">{selectedPack.description}</Text>
+                </div>
+              ) : null}
+            </div>
+
+            {selectedPack.tags && selectedPack.tags.length > 0 ? (
+              <div className="detail-section">
+                <Text as="h3" variant="heading-sm">
+                  Tags
+                </Text>
+                <div className="pill-row">
+                  {selectedPack.tags.map((tag) => (
+                    <span key={tag} className="pill">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="detail-section">
+              <Text as="h3" variant="heading-sm">
+                Knowledge objects
+              </Text>
+
+              <div style={{ margin: '0.75rem 0 0.5rem' }}>
+                <Text variant="body-xs-semibold" color="secondary">
+                  Filter by type
+                </Text>
+                <div className="pill-row" style={{ marginTop: '0.35rem' }}>
+                  {KNOWLEDGE_OBJECT_TYPES.map((option) => {
+                    const isSelected = knowledgeObjectTypeFilter === option;
+                    const label = option === 'all' ? 'All' : option.charAt(0).toUpperCase() + option.slice(1) + 's';
+
+                    return (
+                      <button
+                        key={option}
+                        type="button"
+                        className={`pill${isSelected ? '' : ' pill-subtle'}`}
+                        onClick={() => setKnowledgeObjectTypeFilter(option)}
+                        aria-pressed={isSelected}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '1rem' }}>
+                <Text variant="body-xs-semibold" color="secondary">
+                  Sort by name
+                </Text>
+                <div className="pill-row" style={{ marginTop: '0.35rem' }}>
+                  <button
+                    type="button"
+                    className={`pill${knowledgeObjectSortMode === 'name-asc' ? '' : ' pill-subtle'}`}
+                    onClick={() => setKnowledgeObjectSortMode('name-asc')}
+                  >
+                    A–Z
+                  </button>
+                  <button
+                    type="button"
+                    className={`pill${knowledgeObjectSortMode === 'name-desc' ? '' : ' pill-subtle'}`}
+                    onClick={() => setKnowledgeObjectSortMode('name-desc')}
+                  >
+                    Z–A
+                  </button>
+                </div>
+              </div>
+
+              {koLoading ? (
+                <SkeletonLoader count={3} />
+              ) : knowledgeError ? (
+                <ErrorState error={knowledgeError} onRetry={retryKnowledge} />
+              ) : visibleKnowledgeObjects.length > 0 ? (
+                <>
+                  <KnowledgeObjectGroups
+                    knowledgeObjects={visibleKnowledgeObjects}
+                    selectedKnowledgeObjectKey={selectedKnowledgeObject ? `${selectedKnowledgeObject.type}:${selectedKnowledgeObject.id}` : null}
+                    onSelectKnowledgeObject={setSelectedKnowledgeObject}
+                    renderPreview={(knowledgeObject) => (
+                      <KnowledgeObjectPreviewPanel
+                        knowledgeObject={knowledgeObject}
+                        preview={preview}
+                        loading={previewLoading}
+                        error={previewError}
+                        onRetry={retryPreview}
+                      />
+                    )}
+                  />
+                </>
+              ) : (
+                <EmptyState
+                  title="No knowledge objects found"
+                  description="This pack did not return lookups, pipelines, routes, or functions."
+                />
+              )}
+            </div>
+          </>
         ) : (
-          <EmptyState title="Select a Pack" description="Click on a pack to view details" />
+          <EmptyState
+            title="Select a pack"
+            description="Choose a pack from the list to inspect its metadata and objects."
+          />
         )}
       </div>
+    </section>
+  );
+}
+
+function KnowledgeObjectPreviewPanel({
+  knowledgeObject,
+  preview,
+  loading,
+  error,
+  onRetry,
+}: {
+  knowledgeObject: KnowledgeObject;
+  preview: Awaited<ReturnType<typeof useKnowledgeObjectPreview>>['data'];
+  loading: boolean;
+  error: Awaited<ReturnType<typeof useKnowledgeObjectPreview>>['error'];
+  onRetry: () => void;
+}) {
+  return (
+    <div className="detail-section">
+      <Text as="h3" variant="heading-sm">
+        Selected content
+      </Text>
+
+      {loading ? <SkeletonLoader count={2} /> : null}
+      {!loading && error ? <ErrorState error={error} onRetry={onRetry} /> : null}
+      {!loading && !error && preview?.kind === 'lookup' ? (
+        <div className="preview-card">
+          <div className="section-copy">
+            <Text variant="body-sm-normal" color="secondary">
+              Showing {preview.lookup.rows.length} of {preview.lookup.totalCount} rows for {knowledgeObject.name}.
+            </Text>
+          </div>
+          <div className="preview-table-wrap">
+            <table className="preview-table">
+              <thead>
+                <tr>
+                  {preview.lookup.fields.map((field) => (
+                    <th key={field}>{field}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {preview.lookup.rows.map((row, index) => (
+                  <tr key={`${knowledgeObject.id}:${index}`}>
+                    {row.map((cell, cellIndex) => (
+                      <td key={`${knowledgeObject.id}:${index}:${cellIndex}`}>{String(cell)}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+      {!loading && !error && preview?.kind === 'pipeline' ? (
+        <div className="preview-card">
+          <pre className="preview-code">{JSON.stringify(preview.pipeline.definition, null, 2)}</pre>
+        </div>
+      ) : null}
+      {!loading && !error && preview === null ? (
+        <div className="preview-card">
+          <Text variant="body-sm-normal" color="secondary">
+            Preview is available for lookups and pipelines.
+          </Text>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -4,7 +4,7 @@ A Cribl App for visualizing and managing fleet pack inheritance relationships.
 
 ## Summary
 
-Fleet Inheritance Manager helps Cribl Stream administrators understand how packs are inherited across their fleet infrastructure. It provides clear visibility into which packs are deployed to which fleets, and what knowledge objects (pipelines, routes, functions, etc.) are contained within those packs.
+Fleet Inheritance Manager helps Cribl administrators understand how packs are inherited across their fleet infrastructure. It provides clear visibility into both Stream and Edge fleets, which packs are deployed to them, and what knowledge objects (pipelines, routes, functions, etc.) are contained within those packs.
 
 ## What This App Does
 
@@ -12,7 +12,7 @@ Provide visibility into pack inheritance across Fleets and help administrators u
 
 ### Key capabilities
 
-- **Fleet Inventory View** — Display all configured fleets with detailed metadata
+- **Fleet Inventory View** — Display all configured Stream and Edge fleets with detailed metadata
 - **Pack Explorer** — Browse all available packs with version, author, and tag information
 - **Inheritance Hierarchy** — Visualize the complete inheritance chain from Fleets → Packs → Knowledge Objects
 - **Search and Filter** — Quickly find specific fleets or packs across your environment
@@ -43,7 +43,7 @@ Use Fleet Inheritance Manager when you need to:
 
 ### Requirements
 
-- **Required Cribl product**: Cribl Stream 4.18.0 or later
+- **Required Cribl product**: Cribl Stream / Edge 4.18.0 or later
 - **Required permissions**: Read-only access to groups, packs, and knowledge objects
 - **Supported deployment types**: Leader/standalone deployments
 
@@ -100,8 +100,10 @@ This app is **read-only**. It does not modify any configuration or data.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/products/stream/groups` | List all Fleet Groups |
-| GET | `/products/stream/groups/{id}` | Get Fleet details and pack relationships |
+| GET | `/products/stream/groups` | List Stream Fleet Groups |
+| GET | `/products/stream/groups/{id}` | Get Stream Fleet details and pack relationships |
+| GET | `/products/edge/groups` | List Edge Fleet Groups |
+| GET | `/products/edge/groups/{id}` | Get Edge Fleet details and pack relationships |
 | GET | `/packs` | List all Packs in the environment |
 | GET | `/packs/{id}` | Get Pack metadata and details |
 | GET | `/p/{pack}/functions` | Get Functions within a Pack |
@@ -149,11 +151,11 @@ For issues, feature requests, or questions:
 ### The App Opens But Shows No Fleets
 
 **Possible causes:**
-- No fleets are configured in your Cribl Stream instance
-- Missing permissions to read the `/products/stream/groups` API
+- No Stream or Edge fleets are configured in your Cribl instance
+- Missing permissions to read the `/products/stream/groups` or `/products/edge/groups` APIs
 
 **Solution:**
-- Verify you have a fleet configured in Cribl Stream
+- Verify you have Stream or Edge fleets configured in Cribl
 - Check that your user role has read access to groups and fleets
 - Try refreshing the app
 

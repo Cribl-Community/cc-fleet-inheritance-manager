@@ -2,9 +2,13 @@
  * Fleet Inheritance Manager - Type Definitions
  */
 
+export type FleetProduct = 'stream' | 'edge';
+
 export interface Fleet {
   id: string;
   name: string;
+  product: FleetProduct;
+  parentId?: string;
   description?: string;
   type?: string;
   deployedVersion?: string;
@@ -22,6 +26,7 @@ export interface Pack {
   tags?: string[];
   dependencies?: string[];
   knowledgeObjects?: KnowledgeObject[];
+  groupIds?: string[];
   source?: {
     type: string;
     location?: string;
@@ -37,6 +42,26 @@ export interface KnowledgeObject {
   source?: string;
   schema?: Record<string, unknown>;
 }
+
+export interface LookupContentPreview {
+  fields: string[];
+  rows: Array<Array<string | number>>;
+  totalCount: number;
+}
+
+export interface PipelineContentPreview {
+  definition: Record<string, unknown>;
+}
+
+export type KnowledgeObjectPreview =
+  | {
+      kind: 'lookup';
+      lookup: LookupContentPreview;
+    }
+  | {
+      kind: 'pipeline';
+      pipeline: PipelineContentPreview;
+    };
 
 export interface InheritanceRelation {
   fleet: Fleet;

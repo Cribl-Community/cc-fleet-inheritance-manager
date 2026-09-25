@@ -2,8 +2,8 @@
  * React hooks for data fetching and state management
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import type { Fleet, Pack, KnowledgeObject, FetchError } from './types';
+import { useCallback, useEffect, useState } from 'react';
+import type { FetchError, FleetProduct, KnowledgeObject } from './types';
 import { ApiError } from './api';
 import * as api from './api';
 
@@ -22,7 +22,6 @@ type UseAsyncResult<T> = UseAsyncState<T> & {
  */
 export function useAsync<T>(
   fetchFn: () => Promise<T>,
-  dependencies: unknown[] = []
 ): UseAsyncResult<T> {
   const [state, setState] = useState<UseAsyncState<T>>({
     data: null,
@@ -31,7 +30,8 @@ export function useAsync<T>(
   });
 
   const fetchData = useCallback(async () => {
-    setState({ data: null, loading: true, error: null });
+    setState((current) => ({ ...current, loading: true, error: null }));
+
     try {
       const result = await fetchFn();
       setState({ data: result, loading: false, error: null });
@@ -46,8 +46,8 @@ export function useAsync<T>(
   }, [fetchFn]);
 
   useEffect(() => {
-    fetchData();
-  }, dependencies);
+    void fetchData();
+  }, [fetchData]);
 
   return {
     ...state,
@@ -56,37 +56,53 @@ export function useAsync<T>(
 }
 
 export function useFleets() {
-  return useAsync(() => api.fetchGroups('stream'));
+  const fetchFn = useCallback(() => api.fetchAllFleets(), []);
+
+  return useAsync(fetchFn);
 }
 
-export function useFleet(fleetId: string) {
-  return useAsync(
-    () => api.fetchGroup(fleetId, 'stream'),
-    [fleetId]
-  );
+export function useFleet(fleetId: string, product: FleetProduct) {
+  const fetchFn = useCallback(() => api.fetchGroup(fleetId, product), [fleetId, product]);
+
+  return useAsync(fetchFn);
 }
 
 export function usePacks() {
-  return useAsync(() => api.fetchPacks());
+  const fetchFn = useCallback(() => api.fetchPacks(), []);
+
+  return useAsync(fetchFn);
 }
 
 export function usePack(packId: string) {
-  return useAsync(
-    () => api.fetchPack(packId),
-    [packId]
-  );
+  const fetchFn = useCallback(() => api.fetchPack(packId), [packId]);
+
+  return useAsync(fetchFn);
 }
 
-export function useFleetPacks(fleetId: string) {
-  return useAsync(
-    () => api.fetchFleetPacks(fleetId, 'stream'),
-    [fleetId]
-  );
+export function useFleetPacks(fleetId: string, product: FleetProduct) {
+  const fetchFn = useCallback(() => api.fetchFleetPacks(fleetId, product), [fleetId, product]);
+
+  return useAsync(fetchFn);
 }
 
-export function usePackKnowledgeObjects(packId: string | null) {
-  return useAsync(
-    () => (packId ? api.fetchPackKnowledgeObjects(packId) : Promise.resolve([])),
-    [packId]
+export function usePackKnowledgeObjects(packId: string | null, groupId?: string) {
+  const fetchFn = useCallback(
+    () => (packId ? api.fetchPackKnowledgeObjects(packId, groupId) : Promise.resolve([])),
+    [groupId, packId],
   );
+
+  return useAsync(fetchFn);
+}
+
+export function useKnowledgeObjectPreview(
+  packId: string | null,
+  knowledgeObject: KnowledgeObject | null,
+  groupId?: string,
+) {
+  const fetchFn = useCallback(
+    () => (packId && knowledgeObject ? api.fetchKnowledgeObjectPreview(packId, knowledgeObject, groupId) : Promise.resolve(null)),
+    [groupId, knowledgeObject, packId],
+  );
+
+  return useAsync(fetchFn);
 }

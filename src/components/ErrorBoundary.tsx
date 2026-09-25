@@ -1,5 +1,6 @@
-import React, { ReactNode } from 'react';
-import { Text } from '@capra/core';
+import React from 'react';
+import type { ReactNode } from 'react';
+import { Alert, Text } from '@capra/core';
 import type { FetchError } from '../types';
 
 interface Props {
@@ -23,11 +24,10 @@ export class ErrorBoundary extends React.Component<Props, State> {
   render() {
     if (this.state.error) {
       return (
-        <div style={{ padding: '2rem', color: 'var(--ds-text-danger)' }}>
-          <Text as="h2" variant="heading">
-            Something went wrong
-          </Text>
-          <Text variant="body-sm">{this.state.error.message}</Text>
+        <div className="panel">
+          <Alert appearance="danger" title="Something went wrong">
+            {this.state.error.message}
+          </Alert>
         </div>
       );
     }
@@ -45,18 +45,21 @@ export function ErrorState({ error, onRetry }: ErrorStateProps) {
   if (!error) return null;
 
   return (
-    <div style={{ padding: '2rem', textAlign: 'center' }}>
-      <Text as="h3" variant="heading-sm">
-        Failed to load data
-      </Text>
-      <Text variant="body-sm" style={{ marginBottom: '1rem' }}>
+    <div className="panel">
+      <Alert
+        appearance="danger"
+        title="Failed to load data"
+        action={onRetry ? { label: 'Retry', onClick: () => onRetry() } : undefined}
+      >
         {error.message}
-      </Text>
-      {onRetry && (
-        <button onClick={onRetry} style={{ padding: '0.5rem 1rem' }}>
-          Retry
-        </button>
-      )}
+      </Alert>
+      {error.details ? (
+        <div className="error-details">
+          <Text variant="body-sm-normal" color="secondary">
+            Additional details are available in the browser console.
+          </Text>
+        </div>
+      ) : null}
     </div>
   );
 }
