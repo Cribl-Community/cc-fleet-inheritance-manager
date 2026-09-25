@@ -79,7 +79,7 @@ export function KnowledgeObjectGroups({
   };
 
   const canPreview = (knowledgeObject: KnowledgeObject) =>
-    knowledgeObject.type === 'lookup' || knowledgeObject.type === 'pipeline';
+    knowledgeObject.type === 'lookup' || knowledgeObject.type === 'pipeline' || knowledgeObject.type === 'route';
 
   return (
     <div className="knowledge-group-list">

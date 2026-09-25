@@ -56,6 +56,19 @@ export interface PipelineContentPreview {
   definition: Record<string, unknown>;
 }
 
+export interface RouteContentPreview {
+  id: string;
+  name: string;
+  description?: string;
+  filter?: string;
+  pipeline?: string;
+  output?: string;
+  final?: boolean;
+  disabled?: boolean;
+  tableId?: string;
+  raw: Record<string, unknown>;
+}
+
 export type KnowledgeObjectPreview =
   | {
       kind: 'lookup';
@@ -64,6 +77,10 @@ export type KnowledgeObjectPreview =
   | {
       kind: 'pipeline';
       pipeline: PipelineContentPreview;
+    }
+  | {
+      kind: 'route';
+      route: RouteContentPreview;
     };
 
 export interface InheritanceRelation {

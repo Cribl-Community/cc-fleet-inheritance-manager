@@ -414,10 +414,33 @@ function KnowledgeObjectPreviewPanel({
           <pre className="preview-code">{JSON.stringify(preview.pipeline.definition, null, 2)}</pre>
         </div>
       ) : null}
+      {!loading && !error && preview?.kind === 'route' ? (
+        <div className="preview-card">
+          <div className="section-copy">
+            <Text variant="body-sm-normal" color="secondary">
+              Route {preview.route.name} in table {preview.route.tableId}
+            </Text>
+          </div>
+          <div className="preview-table-wrap">
+            <table className="preview-table">
+              <tbody>
+                <tr><th>Id</th><td>{preview.route.id}</td></tr>
+                <tr><th>Name</th><td>{preview.route.name}</td></tr>
+                <tr><th>Pipeline</th><td>{preview.route.pipeline ?? '—'}</td></tr>
+                <tr><th>Output</th><td>{preview.route.output ?? '—'}</td></tr>
+                <tr><th>Filter</th><td>{preview.route.filter ?? '—'}</td></tr>
+                <tr><th>Final</th><td>{String(preview.route.final ?? '—')}</td></tr>
+                <tr><th>Disabled</th><td>{String(preview.route.disabled ?? '—')}</td></tr>
+                <tr><th>Description</th><td>{preview.route.description ?? '—'}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
       {!loading && !error && preview === null ? (
         <div className="preview-card">
           <Text variant="body-sm-normal" color="secondary">
-            Preview is available for lookups and pipelines.
+            Preview is available for lookups, pipelines, and routes.
           </Text>
         </div>
       ) : null}

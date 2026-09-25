@@ -510,6 +510,22 @@ function PackKnowledgeObjectsList({
             {!previewLoading && !previewError && preview?.kind === 'pipeline' ? (
               <pre className="preview-code">{JSON.stringify(preview.pipeline.definition, null, 2)}</pre>
             ) : null}
+            {!previewLoading && !previewError && preview?.kind === 'route' ? (
+              <div className="preview-table-wrap">
+                <table className="preview-table">
+                  <tbody>
+                    <tr><th>Id</th><td>{preview.route.id}</td></tr>
+                    <tr><th>Name</th><td>{preview.route.name}</td></tr>
+                    <tr><th>Pipeline</th><td>{preview.route.pipeline ?? '—'}</td></tr>
+                    <tr><th>Output</th><td>{preview.route.output ?? '—'}</td></tr>
+                    <tr><th>Filter</th><td>{preview.route.filter ?? '—'}</td></tr>
+                    <tr><th>Final</th><td>{String(preview.route.final ?? '—')}</td></tr>
+                    <tr><th>Disabled</th><td>{String(preview.route.disabled ?? '—')}</td></tr>
+                    <tr><th>Description</th><td>{preview.route.description ?? '—'}</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
           </>
         )}
       />

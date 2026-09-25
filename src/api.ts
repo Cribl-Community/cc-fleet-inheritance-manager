@@ -12,6 +12,7 @@ import type {
   LookupContentPreview,
   Pack,
   PipelineContentPreview,
+  RouteContentPreview,
 } from './types';
 
 type ApiRecord = Record<string, unknown>;
@@ -680,6 +681,52 @@ function mapPipelineContentPreview(payload: unknown): PipelineContentPreview {
   return { definition };
 }
 
+function findRouteEntryFromPayload(payload: unknown, routeId: string): ApiRecord | undefined {
+  const items = getCollectionItems(payload);
+
+  for (const item of items) {
+    if (!Array.isArray(item.routes)) {
+      continue;
+    }
+
+    const match = item.routes
+      .filter(isRecord)
+      .find((entry) => {
+        const candidateId = readString(entry.id) ?? readString(entry.name);
+        return candidateId === routeId;
+      });
+
+    if (match) {
+      return match;
+    }
+  }
+
+  return undefined;
+}
+
+function mapRouteContentPreview(payload: unknown, routeId: string): RouteContentPreview {
+  const route = findRouteEntryFromPayload(payload, routeId) ?? findRouteEntryFromPayload(payload, 'default');
+
+  if (!route) {
+    throw new ApiError('Unexpected route response shape.', 500, payload);
+  }
+
+  const raw = route as Record<string, unknown>;
+
+  return {
+    id: readString(raw.id) ?? routeId,
+    name: readString(raw.name) ?? routeId,
+    description: readString(raw.description),
+    filter: readString(raw.filter),
+    pipeline: readString(raw.pipeline),
+    output: readString(raw.output),
+    final: typeof raw.final === 'boolean' ? raw.final : undefined,
+    disabled: typeof raw.disabled === 'boolean' ? raw.disabled : undefined,
+    tableId: readString(raw.tableId) ?? readString(raw.routingTableId) ?? 'default',
+    raw,
+  };
+}
+
 async function fetchLookupContentPreview(packId: string, lookupId: string): Promise<LookupContentPreview> {
   const payload = await fetchJson(
     `/p/${encodePathSegment(packId)}/system/lookups/${encodePathSegment(lookupId)}/content?limit=20`,
@@ -718,6 +765,20 @@ async function fetchGroupScopedPipelineContentPreview(
   );
 
   return mapPipelineContentPreview(payload);
+}
+
+async function fetchRouteContentPreview(packId: string, routeId: string): Promise<RouteContentPreview> {
+  const payload = await fetchJson(`/p/${encodePathSegment(packId)}/routes`);
+  return mapRouteContentPreview(payload, routeId);
+}
+
+async function fetchGroupScopedRouteContentPreview(
+  groupId: string,
+  packId: string,
+  routeId: string,
+): Promise<RouteContentPreview> {
+  const payload = await fetchGroupScopedJson(groupId, `/p/${encodePathSegment(packId)}/routes`);
+  return mapRouteContentPreview(payload, routeId);
 }
 
 export async function fetchKnowledgeObjectPreview(
@@ -764,6 +825,28 @@ export async function fetchKnowledgeObjectPreview(
           return {
             kind: 'pipeline',
             pipeline: await fetchGroupScopedPipelineContentPreview(candidateGroupId, resolvedPackId, knowledgeObject.id),
+          };
+        } catch {
+          // Try next known group context.
+        }
+      }
+
+      throw globalError;
+    }
+  }
+
+  if (knowledgeObject.type === 'route') {
+    try {
+      return {
+        kind: 'route',
+        route: await fetchRouteContentPreview(resolvedPackId, knowledgeObject.id),
+      };
+    } catch (globalError) {
+      for (const candidateGroupId of candidateGroupIds) {
+        try {
+          return {
+            kind: 'route',
+            route: await fetchGroupScopedRouteContentPreview(candidateGroupId, resolvedPackId, knowledgeObject.id),
           };
         } catch {
           // Try next known group context.
