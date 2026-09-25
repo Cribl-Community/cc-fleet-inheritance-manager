@@ -6,7 +6,7 @@ import { ErrorState } from './ErrorBoundary';
 import { KnowledgeObjectGroups } from './KnowledgeObjectGroups';
 import { EmptyState, SkeletonLoader } from './LoadingState';
 
-const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route', 'function'] as const;
+const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
 type KnowledgeObjectTypeFilter = (typeof KNOWLEDGE_OBJECT_TYPES)[number];
 
 type KnowledgeObjectSortMode = 'name-asc' | 'name-desc';
@@ -138,17 +138,25 @@ export function PacksView() {
         />
 
         <div className="list-stack list-stack-scroll">
-          {filteredPacks.map((pack) => (
-            <button
-              key={pack.id}
-              type="button"
-              className={`list-card${selectedPack?.id === pack.id ? ' list-card-selected' : ''}`}
-              onClick={() => setSelectedPackId(pack.id)}
-            >
-              <div className="list-card-header">
-                <Text variant="body-md-semibold">{pack.displayName || pack.id}</Text>
-                {pack.version ? <span className="pill">v{pack.version}</span> : null}
-              </div>
+          {filteredPacks.map((pack) => {
+            const inheritanceLabel =
+              pack.status === 'inherited-modified' ? 'Inherited modified' :
+              pack.status === 'inherited' ? 'Inherited' : null;
+
+            return (
+              <button
+                key={pack.id}
+                type="button"
+                className={`list-card${selectedPack?.id === pack.id ? ' list-card-selected' : ''}`}
+                onClick={() => setSelectedPackId(pack.id)}
+              >
+                <div className="list-card-header">
+                  <Text variant="body-md-semibold">{pack.displayName || pack.id}</Text>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    {inheritanceLabel ? <span className="inheritance-pill">{inheritanceLabel}</span> : null}
+                    {pack.version ? <span className="pill">v{pack.version}</span> : null}
+                  </div>
+                </div>
               {pack.description ? (
                 <div className="section-copy">
                   <Text variant="body-sm-normal" color="secondary">
@@ -168,8 +176,9 @@ export function PacksView() {
                   ) : null}
                 </div>
               ) : null}
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -194,6 +203,20 @@ export function PacksView() {
                 </Text>
                 <Text variant="body-md-normal">{selectedPack.id}</Text>
               </div>
+              {selectedPack.status ? (
+                <div className="metadata-row">
+                  <Text variant="body-xs-semibold" color="secondary">
+                    Inheritance
+                  </Text>
+                  <Text variant="body-md-normal">
+                    {selectedPack.status === 'inherited-modified'
+                      ? 'Inherited modified'
+                      : selectedPack.status === 'inherited'
+                        ? 'Inherited'
+                        : 'Local'}
+                  </Text>
+                </div>
+              ) : null}
               {selectedPack.version ? (
                 <div className="metadata-row">
                   <Text variant="body-xs-semibold" color="secondary">
@@ -295,7 +318,17 @@ export function PacksView() {
                   <KnowledgeObjectGroups
                     knowledgeObjects={visibleKnowledgeObjects}
                     selectedKnowledgeObjectKey={selectedKnowledgeObject ? `${selectedKnowledgeObject.type}:${selectedKnowledgeObject.id}` : null}
-                    onSelectKnowledgeObject={setSelectedKnowledgeObject}
+                    onSelectKnowledgeObject={(knowledgeObject) => setSelectedKnowledgeObject((current) => {
+                      if (
+                        current &&
+                        current.type === knowledgeObject.type &&
+                        current.id === knowledgeObject.id
+                      ) {
+                        return null;
+                      }
+
+                      return knowledgeObject;
+                    })}
                     renderPreview={(knowledgeObject) => (
                       <KnowledgeObjectPreviewPanel
                         knowledgeObject={knowledgeObject}

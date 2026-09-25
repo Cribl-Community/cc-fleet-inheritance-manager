@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { Text } from '@capra/core';
 import type { KnowledgeObject } from '../types';
 
-const TYPE_ORDER = ['lookup', 'pipeline', 'route', 'function'] as const;
+const TYPE_ORDER = ['lookup', 'pipeline', 'route'] as const;
 
 function getTypeLabel(type: string): string {
   switch (type) {
@@ -13,8 +13,6 @@ function getTypeLabel(type: string): string {
       return 'Pipelines';
     case 'route':
       return 'Routes';
-    case 'function':
-      return 'Functions';
     default:
       return `${type.charAt(0).toUpperCase()}${type.slice(1)}s`;
   }

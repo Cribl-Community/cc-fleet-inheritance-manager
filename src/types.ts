@@ -27,6 +27,9 @@ export interface Pack {
   dependencies?: string[];
   knowledgeObjects?: KnowledgeObject[];
   groupIds?: string[];
+  inheritedFrom?: string;
+  inheritedModified?: boolean;
+  status?: 'local' | 'inherited' | 'inherited-modified';
   source?: {
     type: string;
     location?: string;

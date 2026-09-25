@@ -203,6 +203,20 @@ body {
   background: var(--ds-background-neutral);
 }
 
+.inheritance-pill {
+  --_font: var(--cds2-typography-body-md-normal);
+  --_color: inherit;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(26, 115, 232, 0.12);
+  color: var(--_color);
+  font: var(--_font);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
 .fleet-product-badge,
 .fleet-product-inline {
   display: inline-flex;

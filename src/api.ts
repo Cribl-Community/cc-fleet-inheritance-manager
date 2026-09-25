@@ -240,11 +240,24 @@ function getPackGroupCandidates(packId: string): string[] {
   return Array.from(packGroupCandidates.get(packId.toLowerCase()) ?? []);
 }
 
+function resolvePackInheritanceStatus(pack: Pick<Pack, 'groupIds' | 'inheritedFrom' | 'inheritedModified'>): Pack['status'] {
+  if (pack.inheritedModified) {
+    return 'inherited-modified';
+  }
+
+  if (pack.inheritedFrom || (pack.groupIds && pack.groupIds.length > 0)) {
+    return 'inherited';
+  }
+
+  return 'local';
+}
+
 function mapPack(item: ApiRecord, groupId?: string): Pack {
   const id = readString(item.id) ?? readString(item.name) ?? 'unknown-pack';
-  rememberPackGroup(id, groupId);
-
-  return {
+  const inheritedFrom = readString(item.__srcGroup) ?? groupId;
+  const inheritedModified = item.__srcOverridden === true;
+  const groupIds = groupId ? [groupId] : undefined;
+  const pack: Pack = {
     id,
     displayName: readString(item.displayName) ?? readString(item.name),
     description: readString(item.description),
@@ -254,7 +267,10 @@ function mapPack(item: ApiRecord, groupId?: string): Pack {
     dependencies: Array.isArray(item.dependencies)
       ? item.dependencies.filter((dependency): dependency is string => typeof dependency === 'string')
       : [],
-    groupIds: groupId ? [groupId] : undefined,
+    groupIds,
+    inheritedFrom,
+    inheritedModified,
+    status: undefined,
     source: isRecord(item.source)
       ? {
           type: readString(item.source.type) ?? 'unknown',
@@ -262,6 +278,11 @@ function mapPack(item: ApiRecord, groupId?: string): Pack {
         }
       : undefined,
   };
+
+  pack.status = resolvePackInheritanceStatus(pack);
+  rememberPackGroup(id, groupId);
+
+  return pack;
 }
 
 function mapKnowledgeObject(item: ApiRecord, type: KnowledgeObject['type'], packId: string): KnowledgeObject {
@@ -272,6 +293,22 @@ function mapKnowledgeObject(item: ApiRecord, type: KnowledgeObject['type'], pack
     description: readString(item.description),
     pack: packId,
   };
+}
+
+function mapRouteTableEntries(item: ApiRecord, packId: string): KnowledgeObject[] {
+  if (!Array.isArray(item.routes)) {
+    return [];
+  }
+
+  return item.routes
+    .filter(isRecord)
+    .map((route) => ({
+      id: readString(route.id) ?? readString(route.name) ?? 'default',
+      name: readString(route.name) ?? readString(route.id) ?? 'default',
+      type: 'route' as const,
+      description: readString(route.description),
+      pack: packId,
+    }));
 }
 
 function sortKnowledgeObjects(items: KnowledgeObject[]): KnowledgeObject[] {
@@ -388,16 +425,28 @@ function dedupePacks(packs: Pack[]): Pack[] {
     const existing = byId.get(key);
 
     if (!existing) {
-      byId.set(key, { ...pack, groupIds: pack.groupIds ? [...pack.groupIds] : undefined });
+      const normalized = {
+        ...pack,
+        groupIds: pack.groupIds ? [...pack.groupIds] : undefined,
+        inheritedFrom: pack.inheritedFrom,
+        inheritedModified: Boolean(pack.inheritedModified),
+        status: resolvePackInheritanceStatus(pack),
+      };
+      byId.set(key, normalized);
       return;
     }
 
     const mergedGroupIds = new Set([...(existing.groupIds ?? []), ...(pack.groupIds ?? [])]);
-    byId.set(key, {
+    const mergedPack: Pack = {
       ...existing,
       ...pack,
       groupIds: mergedGroupIds.size > 0 ? Array.from(mergedGroupIds) : undefined,
-    });
+      inheritedFrom: pack.inheritedFrom ?? existing.inheritedFrom,
+      inheritedModified: Boolean(pack.inheritedModified || existing.inheritedModified),
+    };
+    mergedPack.status = resolvePackInheritanceStatus(mergedPack);
+
+    byId.set(key, mergedPack);
   });
 
   return Array.from(byId.values());
@@ -454,7 +503,13 @@ async function fetchFleetPackEntries(product: FleetProduct): Promise<Pack[]> {
         detail.packs.forEach((packItem) => {
           if (typeof packItem === 'string') {
             rememberPackGroup(packItem, groupId);
-            packs.push({ id: packItem, displayName: packItem, groupIds: [groupId] });
+            packs.push({
+              id: packItem,
+              displayName: packItem,
+              groupIds: [groupId],
+              inheritedFrom: groupId,
+              status: 'inherited',
+            });
             return;
           }
 
@@ -525,39 +580,52 @@ async function fetchGroupScopedKnowledgeObjectCollection(
   return items.map((item) => mapKnowledgeObject(item, type, packId));
 }
 
+async function fetchPackRoutesForBasePath(packId: string): Promise<KnowledgeObject[]> {
+  const basePath = `/p/${encodePathSegment(packId)}`;
+  const items = await fetchCollection(`${basePath}/routes`);
+
+  return items.flatMap((item) => mapRouteTableEntries(item, packId));
+}
+
+async function fetchPackRoutesForGroup(groupId: string, packId: string): Promise<KnowledgeObject[]> {
+  const items = await fetchGroupScopedCollectionStrict(groupId, `/p/${encodePathSegment(packId)}/routes`);
+
+  return items.flatMap((item) => mapRouteTableEntries(item, packId));
+}
+
 async function fetchKnowledgeObjectsForBasePath(basePath: string, packId: string): Promise<KnowledgeObject[]> {
-  const [functions, pipelines, routes, lookups] = await Promise.allSettled([
+  const [functions, pipelines, lookups, routes] = await Promise.allSettled([
     fetchKnowledgeObjectCollection(packId, 'function', `${basePath}/functions?showHidden=true`),
     fetchKnowledgeObjectCollection(packId, 'pipeline', `${basePath}/pipelines`),
-    fetchKnowledgeObjectCollection(packId, 'route', `${basePath}/routes`),
     fetchKnowledgeObjectCollection(packId, 'lookup', `${basePath}/system/lookups`),
+    fetchPackRoutesForBasePath(packId),
   ]);
 
-  const failures = [functions, pipelines, routes, lookups].filter((result) => result.status === 'rejected');
+  const failures = [functions, pipelines, lookups, routes].filter((result) => result.status === 'rejected');
   if (failures.length === 4) {
     throw (failures[0] as PromiseRejectedResult).reason;
   }
 
-  return sortKnowledgeObjects([functions, pipelines, routes, lookups].flatMap((result) =>
+  return sortKnowledgeObjects([functions, pipelines, lookups, routes].flatMap((result) =>
     result.status === 'fulfilled' ? result.value : [],
   ));
 }
 
 async function fetchKnowledgeObjectsForGroup(groupId: string, packId: string): Promise<KnowledgeObject[]> {
   const encodedPackId = encodePathSegment(packId);
-  const [functions, pipelines, routes, lookups] = await Promise.allSettled([
+  const [functions, pipelines, lookups, routes] = await Promise.allSettled([
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'function', `/p/${encodedPackId}/functions?showHidden=true`),
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'pipeline', `/p/${encodedPackId}/pipelines`),
-    fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'route', `/p/${encodedPackId}/routes`),
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'lookup', `/p/${encodedPackId}/system/lookups`),
+    fetchPackRoutesForGroup(groupId, packId),
   ]);
 
-  const failures = [functions, pipelines, routes, lookups].filter((result) => result.status === 'rejected');
+  const failures = [functions, pipelines, lookups, routes].filter((result) => result.status === 'rejected');
   if (failures.length === 4) {
     throw (failures[0] as PromiseRejectedResult).reason;
   }
 
-  return sortKnowledgeObjects([functions, pipelines, routes, lookups].flatMap((result) =>
+  return sortKnowledgeObjects([functions, pipelines, lookups, routes].flatMap((result) =>
     result.status === 'fulfilled' ? result.value : [],
   ));
 }
@@ -725,7 +793,7 @@ export async function fetchFleetPacks(groupId: string, product: FleetProduct = '
   return item.packs.flatMap((packItem) => {
     if (typeof packItem === 'string') {
       rememberPackGroup(packItem, groupId);
-      return [{ id: packItem, displayName: packItem, groupIds: [groupId] }];
+      return [{ id: packItem, displayName: packItem, groupIds: [groupId], inheritedFrom: groupId, status: 'inherited' }];
     }
 
     if (isRecord(packItem)) {

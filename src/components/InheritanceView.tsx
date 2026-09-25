@@ -7,7 +7,7 @@ import { FleetProductBadge } from './FleetProductBadge';
 import { KnowledgeObjectGroups } from './KnowledgeObjectGroups';
 import { EmptyState, SkeletonLoader } from './LoadingState';
 
-const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route', 'function'] as const;
+const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
 type KnowledgeObjectTypeFilter = (typeof KNOWLEDGE_OBJECT_TYPES)[number];
 type KnowledgeObjectSortMode = 'name-asc' | 'name-desc';
 
@@ -358,7 +358,16 @@ function FleetPacksHierarchy({
                 {isExpanded ? '▼' : '▶'}
               </span>
               <div className="tree-copy">
-                <Text variant="body-sm-semibold">{pack.displayName || pack.id}</Text>
+                <div className="list-card-header">
+                  <Text variant="body-sm-semibold">{pack.displayName || pack.id}</Text>
+                  {pack.status === 'inherited-modified' ? (
+                    <span className="inheritance-pill">Inherited modified</span>
+                  ) : pack.status === 'inherited' ? (
+                    <span className="inheritance-pill">Inherited</span>
+                  ) : pack.status === 'local' ? (
+                    <span className="pill pill-subtle">Local</span>
+                  ) : null}
+                </div>
                 {pack.version ? (
                   <div className="section-copy">
                     <Text variant="body-xs-normal" color="secondary">
@@ -458,7 +467,17 @@ function PackKnowledgeObjectsList({
         knowledgeObjects={visibleKnowledgeObjects}
         variant="tree"
         selectedKnowledgeObjectKey={selectedKnowledgeObject ? `${selectedKnowledgeObject.type}:${selectedKnowledgeObject.id}` : null}
-        onSelectKnowledgeObject={setSelectedKnowledgeObject}
+        onSelectKnowledgeObject={(knowledgeObject) => setSelectedKnowledgeObject((current) => {
+          if (
+            current &&
+            current.type === knowledgeObject.type &&
+            current.id === knowledgeObject.id
+          ) {
+            return null;
+          }
+
+          return knowledgeObject;
+        })}
         renderPreview={(knowledgeObject) => (
           <>
             <div className="section-copy">
