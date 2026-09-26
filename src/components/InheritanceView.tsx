@@ -8,8 +8,17 @@ import { KnowledgeObjectGroups } from './KnowledgeObjectGroups';
 import { EmptyState, SkeletonLoader } from './LoadingState';
 
 const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
+const INHERITANCE_CHART_MODES = ['tree', 'levels', 'paths', 'sankey'] as const;
 type KnowledgeObjectTypeFilter = (typeof KNOWLEDGE_OBJECT_TYPES)[number];
 type KnowledgeObjectSortMode = 'name-asc' | 'name-desc';
+type InheritanceChartMode = (typeof INHERITANCE_CHART_MODES)[number];
+type FleetProductFilter = 'all' | FleetProduct;
+
+const SANKEY_COLUMN_WIDTH = 220;
+const SANKEY_COLUMN_GAP = 96;
+const SANKEY_NODE_HEIGHT = 102;
+const SANKEY_NODE_GAP = 22;
+const SANKEY_PADDING = 24;
 
 function sortKnowledgeObjectsByName(
   knowledgeObjects: KnowledgeObject[],
@@ -31,9 +40,51 @@ interface FleetTreeNodeModel {
   children: FleetTreeNodeModel[];
 }
 
+interface FleetDepthColumn {
+  depth: number;
+  fleets: FleetTreeNodeModel[];
+}
+
+interface FleetLineageRow {
+  fleet: Fleet;
+  lineage: Fleet[];
+  childCount: number;
+}
+
+interface SankeyNodeLayout {
+  key: string;
+  fleet: Fleet;
+  parentName: string | null;
+  depth: number;
+  row: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  childCount: number;
+}
+
+interface SankeyLinkLayout {
+  key: string;
+  sourceKey: string;
+  targetKey: string;
+  sourceName: string;
+  targetName: string;
+  path: string;
+}
+
+interface InheritanceSankeyLayout {
+  nodes: SankeyNodeLayout[];
+  links: SankeyLinkLayout[];
+  width: number;
+  height: number;
+}
+
 export function InheritanceView() {
   const { data: fleets, loading: fleetsLoading, error: fleetsError, retry: retryFleets } = useFleets();
   const [searchTerm, setSearchTerm] = useState('');
+  const [chartMode, setChartMode] = useState<InheritanceChartMode>('tree');
+  const [productFilter, setProductFilter] = useState<FleetProductFilter>('all');
   const [expandedFleets, setExpandedFleets] = useState<Set<string>>(new Set());
   const [knowledgeObjectTypeFilter, setKnowledgeObjectTypeFilter] = useState<KnowledgeObjectTypeFilter>('all');
   const [knowledgeObjectSortMode, setKnowledgeObjectSortMode] = useState<KnowledgeObjectSortMode>('name-asc');
@@ -63,13 +114,23 @@ export function InheritanceView() {
     const query = searchTerm.trim().toLowerCase();
 
     if (!query) {
-      return fleetForest;
+      return fleetForest
+        .map((node) => filterFleetTree(node, query, productFilter))
+        .filter((node): node is FleetTreeNodeModel => node !== null);
     }
 
     return fleetForest
-      .map((node) => filterFleetTree(node, query))
+      .map((node) => filterFleetTree(node, query, productFilter))
       .filter((node): node is FleetTreeNodeModel => node !== null);
-  }, [fleetForest, searchTerm]);
+  }, [fleetForest, productFilter, searchTerm]);
+
+  const totalVisibleFleets = useMemo(() => countFleetNodes(filteredFleetForest), [filteredFleetForest]);
+
+  const fleetDepthColumns = useMemo(() => buildFleetDepthColumns(filteredFleetForest), [filteredFleetForest]);
+
+  const fleetLineageRows = useMemo(() => buildFleetLineageRows(filteredFleetForest), [filteredFleetForest]);
+
+  const sankeyLayout = useMemo(() => buildInheritanceSankeyLayout(filteredFleetForest), [filteredFleetForest]);
 
   const toggleFleet = (fleetId: string) => {
     const newExpanded = new Set(expandedFleets);
@@ -106,26 +167,33 @@ export function InheritanceView() {
         </Text>
         <div className="section-copy">
           <Text variant="body-sm-normal" color="secondary">
-            Expand a fleet to inspect its packs and the knowledge objects inside each pack.
+            Switch between a detailed drill-down tree and three chart-styled inheritance summaries.
           </Text>
         </div>
       </div>
 
       <div style={{ marginBottom: '0.75rem' }}>
         <Text variant="body-xs-semibold" color="secondary">
-          Filter by type
+          View mode
         </Text>
         <div className="pill-row" style={{ marginTop: '0.35rem' }}>
-          {KNOWLEDGE_OBJECT_TYPES.map((option) => {
-            const isSelected = knowledgeObjectTypeFilter === option;
-            const label = option === 'all' ? 'All' : option.charAt(0).toUpperCase() + option.slice(1) + 's';
+          {INHERITANCE_CHART_MODES.map((mode) => {
+            const isSelected = chartMode === mode;
+            const label =
+              mode === 'tree'
+                ? 'Detailed tree'
+                : mode === 'levels'
+                  ? 'Levels chart'
+                  : mode === 'paths'
+                    ? 'Lineage chart'
+                    : 'Sankey chart';
 
             return (
               <button
-                key={option}
+                key={mode}
                 type="button"
                 className={`pill${isSelected ? '' : ' pill-subtle'}`}
-                onClick={() => setKnowledgeObjectTypeFilter(option)}
+                onClick={() => setChartMode(mode)}
                 aria-pressed={isSelected}
               >
                 {label}
@@ -137,25 +205,77 @@ export function InheritanceView() {
 
       <div style={{ marginBottom: '0.75rem' }}>
         <Text variant="body-xs-semibold" color="secondary">
-          Sort by name
+          Fleet product
         </Text>
         <div className="pill-row" style={{ marginTop: '0.35rem' }}>
-          <button
-            type="button"
-            className={`pill${knowledgeObjectSortMode === 'name-asc' ? '' : ' pill-subtle'}`}
-            onClick={() => setKnowledgeObjectSortMode('name-asc')}
-          >
-            A–Z
-          </button>
-          <button
-            type="button"
-            className={`pill${knowledgeObjectSortMode === 'name-desc' ? '' : ' pill-subtle'}`}
-            onClick={() => setKnowledgeObjectSortMode('name-desc')}
-          >
-            Z–A
-          </button>
+          {(['all', 'stream', 'edge'] as const).map((option) => {
+            const isSelected = productFilter === option;
+            const label = option === 'all' ? 'All fleets' : option === 'stream' ? 'Stream' : 'Edge';
+
+            return (
+              <button
+                key={option}
+                type="button"
+                className={`pill${isSelected ? '' : ' pill-subtle'}`}
+                onClick={() => setProductFilter(option)}
+                aria-pressed={isSelected}
+              >
+                {label}
+              </button>
+            );
+          })}
         </div>
       </div>
+
+      {chartMode === 'tree' ? (
+        <>
+          <div style={{ marginBottom: '0.75rem' }}>
+            <Text variant="body-xs-semibold" color="secondary">
+              Filter by type
+            </Text>
+            <div className="pill-row" style={{ marginTop: '0.35rem' }}>
+              {KNOWLEDGE_OBJECT_TYPES.map((option) => {
+                const isSelected = knowledgeObjectTypeFilter === option;
+                const label = option === 'all' ? 'All' : option.charAt(0).toUpperCase() + option.slice(1) + 's';
+
+                return (
+                  <button
+                    key={option}
+                    type="button"
+                    className={`pill${isSelected ? '' : ' pill-subtle'}`}
+                    onClick={() => setKnowledgeObjectTypeFilter(option)}
+                    aria-pressed={isSelected}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '0.75rem' }}>
+            <Text variant="body-xs-semibold" color="secondary">
+              Sort by name
+            </Text>
+            <div className="pill-row" style={{ marginTop: '0.35rem' }}>
+              <button
+                type="button"
+                className={`pill${knowledgeObjectSortMode === 'name-asc' ? '' : ' pill-subtle'}`}
+                onClick={() => setKnowledgeObjectSortMode('name-asc')}
+              >
+                A–Z
+              </button>
+              <button
+                type="button"
+                className={`pill${knowledgeObjectSortMode === 'name-desc' ? '' : ' pill-subtle'}`}
+                onClick={() => setKnowledgeObjectSortMode('name-desc')}
+              >
+                Z–A
+              </button>
+            </div>
+          </div>
+        </>
+      ) : null}
 
       <input
         className="search-input"
@@ -165,21 +285,49 @@ export function InheritanceView() {
         onChange={(event) => setSearchTerm(event.target.value)}
       />
 
-      <div className="list-stack">
-        {filteredFleetForest.map((node) => (
-          <FleetTreeNode
-            key={`${node.fleet.product}:${node.fleet.id}`}
-            node={node}
-            expandedFleets={expandedFleets}
-            onToggleFleet={toggleFleet}
-            knowledgeObjectTypeFilter={knowledgeObjectTypeFilter}
-            knowledgeObjectSortMode={knowledgeObjectSortMode}
-            packInventoryByKey={packInventoryByKey}
-            setPackInventoryByKey={setPackInventoryByKey}
-            fleetLookupById={fleetLookupById}
-          />
-        ))}
-      </div>
+      <InheritanceSummary
+        totalFleets={totalVisibleFleets}
+        rootCount={filteredFleetForest.length}
+        deepestLevel={fleetDepthColumns.length}
+        currentMode={chartMode}
+      />
+
+      {filteredFleetForest.length === 0 ? (
+        <EmptyState
+          title="No fleets match this search"
+          description="Try a different fleet name or description fragment."
+        />
+      ) : null}
+
+      {filteredFleetForest.length > 0 && chartMode === 'tree' ? (
+        <div className="list-stack">
+          {filteredFleetForest.map((node) => (
+            <FleetTreeNode
+              key={`${node.fleet.product}:${node.fleet.id}`}
+              node={node}
+              expandedFleets={expandedFleets}
+              onToggleFleet={toggleFleet}
+              knowledgeObjectTypeFilter={knowledgeObjectTypeFilter}
+              knowledgeObjectSortMode={knowledgeObjectSortMode}
+              packInventoryByKey={packInventoryByKey}
+              setPackInventoryByKey={setPackInventoryByKey}
+              fleetLookupById={fleetLookupById}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {filteredFleetForest.length > 0 && chartMode === 'levels' ? (
+        <InheritanceLevelsChart columns={fleetDepthColumns} fleetLookupById={fleetLookupById} />
+      ) : null}
+
+      {filteredFleetForest.length > 0 && chartMode === 'paths' ? (
+        <InheritanceLineageChart rows={fleetLineageRows} fleetLookupById={fleetLookupById} />
+      ) : null}
+
+      {filteredFleetForest.length > 0 && chartMode === 'sankey' ? (
+        <InheritanceSankeyChart layout={sankeyLayout} />
+      ) : null}
     </section>
   );
 }
@@ -223,16 +371,21 @@ function buildFleetForest(fleets: Fleet[]): FleetTreeNodeModel[] {
   return roots;
 }
 
-function filterFleetTree(node: FleetTreeNodeModel, query: string): FleetTreeNodeModel | null {
+function filterFleetTree(
+  node: FleetTreeNodeModel,
+  query: string,
+  productFilter: FleetProductFilter,
+): FleetTreeNodeModel | null {
+  const matchesProduct = productFilterMatches(node.fleet.product, productFilter);
   const matchesSelf =
     node.fleet.name.toLowerCase().includes(query) ||
     (node.fleet.description ?? '').toLowerCase().includes(query);
 
   const filteredChildren = node.children
-    .map((child) => filterFleetTree(child, query))
+    .map((child) => filterFleetTree(child, query, productFilter))
     .filter((child): child is FleetTreeNodeModel => child !== null);
 
-  if (!matchesSelf && filteredChildren.length === 0) {
+  if ((!matchesSelf || !matchesProduct) && filteredChildren.length === 0) {
     return null;
   }
 
@@ -240,6 +393,419 @@ function filterFleetTree(node: FleetTreeNodeModel, query: string): FleetTreeNode
     fleet: node.fleet,
     children: filteredChildren,
   };
+}
+
+function productFilterMatches(product: FleetProduct, filter: FleetProductFilter): boolean {
+  return filter === 'all' || product === filter;
+}
+
+function countFleetNodes(nodes: FleetTreeNodeModel[]): number {
+  return nodes.reduce((total, node) => total + 1 + countFleetNodes(node.children), 0);
+}
+
+function buildFleetDepthColumns(forest: FleetTreeNodeModel[]): FleetDepthColumn[] {
+  const columns = new Map<number, FleetTreeNodeModel[]>();
+
+  const visit = (node: FleetTreeNodeModel, depth: number) => {
+    const existing = columns.get(depth) ?? [];
+    existing.push(node);
+    columns.set(depth, existing);
+    node.children.forEach((child) => visit(child, depth + 1));
+  };
+
+  forest.forEach((node) => visit(node, 0));
+
+  return Array.from(columns.entries())
+    .sort((left, right) => left[0] - right[0])
+    .map(([depth, fleets]) => ({ depth, fleets }));
+}
+
+function buildFleetLineageRows(forest: FleetTreeNodeModel[]): FleetLineageRow[] {
+  const rows: FleetLineageRow[] = [];
+
+  const visit = (node: FleetTreeNodeModel, lineage: Fleet[]) => {
+    const nextLineage = [...lineage, node.fleet];
+    rows.push({
+      fleet: node.fleet,
+      lineage: nextLineage,
+      childCount: node.children.length,
+    });
+    node.children.forEach((child) => visit(child, nextLineage));
+  };
+
+  forest.forEach((node) => visit(node, []));
+
+  return rows;
+}
+
+function buildInheritanceSankeyLayout(forest: FleetTreeNodeModel[]): InheritanceSankeyLayout {
+  const depthColumns = buildFleetDepthColumns(forest);
+  const nodes: SankeyNodeLayout[] = depthColumns.flatMap((column) =>
+    column.fleets.map((node, row) => ({
+      key: `${node.fleet.product}:${node.fleet.id}`,
+      fleet: node.fleet,
+      parentName: null,
+      depth: column.depth,
+      row,
+      x: SANKEY_PADDING + column.depth * (SANKEY_COLUMN_WIDTH + SANKEY_COLUMN_GAP),
+      y: SANKEY_PADDING + row * (SANKEY_NODE_HEIGHT + SANKEY_NODE_GAP),
+      width: SANKEY_COLUMN_WIDTH,
+      height: SANKEY_NODE_HEIGHT,
+      childCount: node.children.length,
+    })),
+  );
+
+  const nodeByKey = new Map(nodes.map((node) => [node.key, node]));
+
+  nodes.forEach((node) => {
+    if (!node.fleet.parentId) {
+      return;
+    }
+
+    const parentNode = nodeByKey.get(`${node.fleet.product}:${node.fleet.parentId}`);
+    node.parentName = parentNode?.fleet.name ?? node.fleet.parentId;
+  });
+
+  const links: SankeyLinkLayout[] = [];
+
+  const visit = (node: FleetTreeNodeModel) => {
+    const sourceKey = `${node.fleet.product}:${node.fleet.id}`;
+    const sourceNode = nodeByKey.get(sourceKey);
+
+    node.children.forEach((child) => {
+      const targetKey = `${child.fleet.product}:${child.fleet.id}`;
+      const targetNode = nodeByKey.get(targetKey);
+
+      if (sourceNode && targetNode) {
+        const sourceX = sourceNode.x + sourceNode.width;
+        const sourceY = sourceNode.y + sourceNode.height / 2;
+        const targetX = targetNode.x;
+        const targetY = targetNode.y + targetNode.height / 2;
+        const controlOffset = Math.max((targetX - sourceX) * 0.45, 36);
+
+        links.push({
+          key: `${sourceKey}->${targetKey}`,
+          sourceKey,
+          targetKey,
+          sourceName: sourceNode.fleet.name,
+          targetName: targetNode.fleet.name,
+          path: `M ${sourceX} ${sourceY} C ${sourceX + controlOffset} ${sourceY}, ${targetX - controlOffset} ${targetY}, ${targetX} ${targetY}`,
+        });
+      }
+
+      visit(child);
+    });
+  };
+
+  forest.forEach((node) => visit(node));
+
+  const width = Math.max(
+    SANKEY_PADDING * 2 + SANKEY_COLUMN_WIDTH,
+    SANKEY_PADDING * 2 + depthColumns.length * SANKEY_COLUMN_WIDTH + Math.max(depthColumns.length - 1, 0) * SANKEY_COLUMN_GAP,
+  );
+  const tallestColumn = depthColumns.reduce((maxHeight, column) => {
+    const columnHeight = column.fleets.length * SANKEY_NODE_HEIGHT + Math.max(column.fleets.length - 1, 0) * SANKEY_NODE_GAP;
+    return Math.max(maxHeight, columnHeight);
+  }, 0);
+  const height = Math.max(SANKEY_PADDING * 2 + SANKEY_NODE_HEIGHT, SANKEY_PADDING * 2 + tallestColumn);
+
+  return {
+    nodes,
+    links,
+    width,
+    height,
+  };
+}
+
+function wrapSankeyDescription(description: string | undefined, maxLineLength = 30): string[] {
+  if (!description) {
+    return [];
+  }
+
+  const normalized = description.trim().replace(/\s+/g, ' ');
+
+  if (!normalized) {
+    return [];
+  }
+
+  const words = normalized.split(' ');
+  const lines: string[] = [];
+  let currentLine = '';
+
+  words.forEach((word) => {
+    const nextLine = currentLine ? `${currentLine} ${word}` : word;
+
+    if (nextLine.length <= maxLineLength) {
+      currentLine = nextLine;
+      return;
+    }
+
+    if (currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+      return;
+    }
+
+    lines.push(word.slice(0, maxLineLength - 1) + '…');
+  });
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.slice(0, 2).map((line, index, source) => {
+    if (index === source.length - 1 && lines.length > 2) {
+      return `${line.slice(0, Math.max(0, maxLineLength - 1)).trimEnd()}…`;
+    }
+
+    return line;
+  });
+}
+
+function InheritanceSummary({
+  totalFleets,
+  rootCount,
+  deepestLevel,
+  currentMode,
+}: {
+  totalFleets: number;
+  rootCount: number;
+  deepestLevel: number;
+  currentMode: InheritanceChartMode;
+}) {
+  return (
+    <div className="inheritance-summary-grid">
+      <div className="inheritance-summary-card">
+        <Text variant="body-xs-semibold" color="secondary">
+          Fleets in view
+        </Text>
+        <Text as="div" variant="heading-md">
+          {totalFleets}
+        </Text>
+      </div>
+      <div className="inheritance-summary-card">
+        <Text variant="body-xs-semibold" color="secondary">
+          Root fleets
+        </Text>
+        <Text as="div" variant="heading-md">
+          {rootCount}
+        </Text>
+      </div>
+      <div className="inheritance-summary-card">
+        <Text variant="body-xs-semibold" color="secondary">
+          Depth
+        </Text>
+        <Text as="div" variant="heading-md">
+          {deepestLevel}
+        </Text>
+      </div>
+      <div className="inheritance-summary-card">
+        <Text variant="body-xs-semibold" color="secondary">
+          Active chart
+        </Text>
+        <Text as="div" variant="heading-sm">
+          {currentMode === 'tree'
+            ? 'Detailed tree'
+            : currentMode === 'levels'
+              ? 'Levels chart'
+              : currentMode === 'paths'
+                ? 'Lineage chart'
+                : 'Sankey chart'}
+        </Text>
+      </div>
+    </div>
+  );
+}
+
+function InheritanceLevelsChart({
+  columns,
+  fleetLookupById,
+}: {
+  columns: FleetDepthColumn[];
+  fleetLookupById: Map<string, Fleet>;
+}) {
+  return (
+    <div className="inheritance-levels-chart" role="list" aria-label="Fleet inheritance levels chart">
+      {columns.map((column) => (
+        <section key={column.depth} className="inheritance-level-column" role="listitem">
+          <div className="inheritance-level-header">
+            <Text variant="body-xs-semibold" color="secondary">
+              Level {column.depth + 1}
+            </Text>
+            <Text variant="body-sm-normal" color="secondary">
+              {column.fleets.length} fleet{column.fleets.length === 1 ? '' : 's'}
+            </Text>
+          </div>
+
+          <div className="inheritance-level-cards">
+            {column.fleets.map((node) => {
+              const parentFleet = node.fleet.parentId ? fleetLookupById.get(node.fleet.parentId) : undefined;
+
+              return (
+                <article key={`${node.fleet.product}:${node.fleet.id}`} className="inheritance-chart-card">
+                  <div className="list-card-header">
+                    <Text variant="body-md-semibold">{node.fleet.name}</Text>
+                    <FleetProductBadge product={node.fleet.product} />
+                  </div>
+                  <div className="inheritance-parent-link" aria-label={parentFleet ? `Parent fleet ${parentFleet.name}` : 'Root fleet'}>
+                    <span className="inheritance-parent-link-label">{parentFleet ? 'Inherits from' : 'Root fleet'}</span>
+                    <span className="inheritance-parent-link-value">{parentFleet?.name ?? 'No parent'}</span>
+                  </div>
+                  <div className="section-copy">
+                    <Text variant="body-xs-normal" color="secondary">
+                      {node.children.length === 0
+                        ? 'Leaf fleet'
+                        : `${node.children.length} direct child${node.children.length === 1 ? '' : 'ren'}`}
+                    </Text>
+                  </div>
+                  {node.fleet.description ? (
+                    <div className="section-copy">
+                      <Text variant="body-sm-normal" color="secondary">
+                        {node.fleet.description}
+                      </Text>
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function InheritanceLineageChart({
+  rows,
+  fleetLookupById,
+}: {
+  rows: FleetLineageRow[];
+  fleetLookupById: Map<string, Fleet>;
+}) {
+  return (
+    <div className="inheritance-lineage-chart">
+      {rows.map((row) => {
+        const parentFleet = row.fleet.parentId ? fleetLookupById.get(row.fleet.parentId) : undefined;
+
+        return (
+          <article key={`${row.fleet.product}:${row.fleet.id}`} className="inheritance-lineage-row">
+            <div className="inheritance-lineage-track" aria-hidden="true" />
+            <div className="inheritance-lineage-sequence">
+              {row.lineage.map((fleet, index) => {
+                const isTerminal = index === row.lineage.length - 1;
+                const directParent = index > 0 ? row.lineage[index - 1] : undefined;
+
+                return (
+                  <div key={`${fleet.product}:${fleet.id}`} className="inheritance-lineage-node-wrap">
+                    <div className={`inheritance-lineage-node${isTerminal ? ' inheritance-lineage-node-terminal' : ''}`}>
+                      <Text variant="body-sm-semibold">{fleet.name}</Text>
+                      <div className="section-copy">
+                        <FleetProductBadge product={fleet.product} />
+                      </div>
+                      <div className="inheritance-lineage-parent-copy">
+                        <Text variant="body-xs-normal" color="secondary">
+                          {directParent ? `Parent: ${directParent.name}` : 'Parent: none'}
+                        </Text>
+                      </div>
+                    </div>
+                    {index < row.lineage.length - 1 ? <div className="inheritance-lineage-connector" aria-hidden="true" /> : null}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="inheritance-lineage-meta">
+              <Text variant="body-xs-semibold" color="secondary">
+                {parentFleet ? `Current fleet inherits from ${parentFleet.name}` : 'Root lineage'}
+              </Text>
+              <Text variant="body-xs-normal" color="secondary">
+                {row.childCount === 0 ? 'Leaf lineage' : `${row.childCount} downstream branch${row.childCount === 1 ? '' : 'es'}`}
+              </Text>
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function InheritanceSankeyChart({ layout }: { layout: InheritanceSankeyLayout }) {
+  return (
+    <div className="inheritance-sankey-shell">
+      <div className="inheritance-sankey-caption">
+        <Text variant="body-sm-normal" color="secondary">
+          Flow lines show parent fleets passing inheritance downstream into child fleets.
+        </Text>
+      </div>
+
+      <div className="inheritance-sankey-scroll">
+        <svg
+          className="inheritance-sankey-svg"
+          viewBox={`0 0 ${layout.width} ${layout.height}`}
+          role="img"
+          aria-label="Fleet inheritance Sankey chart"
+          preserveAspectRatio="xMinYMin meet"
+        >
+          {layout.links.map((link) => (
+            <path
+              key={link.key}
+              d={link.path}
+              className="inheritance-sankey-link"
+            >
+              <title>{`${link.sourceName} inherits into ${link.targetName}`}</title>
+            </path>
+          ))}
+
+          {layout.nodes.map((node) => (
+            (() => {
+              const descriptionLines = wrapSankeyDescription(node.fleet.description);
+
+              return (
+                <g key={node.key} transform={`translate(${node.x}, ${node.y})`}>
+                  <rect
+                    className="inheritance-sankey-node"
+                    width={node.width}
+                    height={node.height}
+                    rx="14"
+                    ry="14"
+                  />
+                  <rect
+                    className="inheritance-sankey-node-accent"
+                    width="8"
+                    height={node.height}
+                    rx="14"
+                    ry="14"
+                  />
+                  <text x="18" y="24" className="inheritance-sankey-node-title">
+                    {node.fleet.name}
+                  </text>
+                  <text x="18" y="44" className="inheritance-sankey-node-meta">
+                    {node.parentName ? `Parent: ${node.parentName}` : 'Root fleet'}
+                  </text>
+                  <text x={node.width - 18} y="44" textAnchor="end" className="inheritance-sankey-node-meta">
+                    {node.childCount === 0 ? 'Leaf' : `${node.childCount} child${node.childCount === 1 ? '' : 'ren'}`}
+                  </text>
+                  {descriptionLines.length > 0 ? (
+                    <text x="18" y="66" className="inheritance-sankey-node-description">
+                      {descriptionLines.map((line, index) => (
+                        <tspan key={`${node.key}:description:${index}`} x="18" dy={index === 0 ? 0 : 14}>
+                          {line}
+                        </tspan>
+                      ))}
+                    </text>
+                  ) : null}
+                  <title>
+                    {node.parentName
+                      ? `${node.fleet.name} inherits from ${node.parentName}${node.fleet.description ? `. ${node.fleet.description}` : ''}`
+                      : `${node.fleet.name} is a root fleet${node.fleet.description ? `. ${node.fleet.description}` : ''}`}
+                  </title>
+                </g>
+              );
+            })()
+          ))}
+        </svg>
+      </div>
+    </div>
+  );
 }
 
 function FleetTreeNode({
