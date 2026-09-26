@@ -567,6 +567,43 @@ body {
   font-size: 0.72rem;
 }
 
+.pack-relationship-card {
+  background:
+    linear-gradient(135deg, rgba(26, 115, 232, 0.08), transparent 65%),
+    var(--ds-background);
+}
+
+.pack-sankey-svg {
+  min-width: 54rem;
+}
+
+.pack-sankey-link-reference {
+  stroke: rgba(0, 0, 0, 0.2);
+  stroke-dasharray: 10 8;
+}
+
+.dark .pack-sankey-link-reference {
+  stroke: rgba(255, 255, 255, 0.2);
+}
+
+.pack-sankey-node-selected {
+  stroke: var(--ds-accent);
+  stroke-width: 2;
+}
+
+.pack-sankey-node-reference-accent {
+  opacity: 0.42;
+}
+
+.pack-sankey-node-interactive {
+  cursor: pointer;
+}
+
+.pack-version-pill {
+  background: rgba(220, 53, 69, 0.12);
+  color: var(--ds-text-danger);
+}
+
 .preview-card {
   margin-top: 1rem;
   padding: 1rem;

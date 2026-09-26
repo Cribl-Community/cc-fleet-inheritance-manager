@@ -37,6 +37,28 @@ export interface Pack {
   };
 }
 
+export interface PackUsageLocation {
+  fleetId: string;
+  fleetName: string;
+  product: FleetProduct;
+  status?: Pack['status'];
+  inheritedFrom?: string;
+  configDrift?: boolean;
+  version?: string;
+}
+
+export interface PackReference {
+  packId: string;
+  packDisplayName: string;
+  exists: boolean;
+}
+
+export interface PackRelationshipSummary extends Pack {
+  usageLocations: PackUsageLocation[];
+  references: PackReference[];
+  referencedBy: PackReference[];
+}
+
 export interface KnowledgeObject {
   id: string;
   name: string;

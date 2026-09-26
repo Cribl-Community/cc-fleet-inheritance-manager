@@ -11,6 +11,9 @@ import type {
   KnowledgeObjectPreview,
   LookupContentPreview,
   Pack,
+  PackReference,
+  PackRelationshipSummary,
+  PackUsageLocation,
   PipelineContentPreview,
   RouteContentPreview,
 } from './types';
@@ -629,6 +632,149 @@ export async function fetchPacks(): Promise<Pack[]> {
   return dedupePacks(packs);
 }
 
+function dedupePackUsageLocations(usageLocations: PackUsageLocation[]): PackUsageLocation[] {
+  const byKey = new Map<string, PackUsageLocation>();
+
+  usageLocations.forEach((usageLocation) => {
+    byKey.set(`${usageLocation.product}:${usageLocation.fleetId}`, usageLocation);
+  });
+
+  return Array.from(byKey.values()).sort((left, right) => {
+    const productOrder = left.product.localeCompare(right.product);
+
+    if (productOrder !== 0) {
+      return productOrder;
+    }
+
+    return left.fleetName.localeCompare(right.fleetName);
+  });
+}
+
+function dedupePackReferences(references: PackReference[]): PackReference[] {
+  const byKey = new Map<string, PackReference>();
+
+  references.forEach((reference) => {
+    byKey.set(reference.packId.toLowerCase(), reference);
+  });
+
+  return Array.from(byKey.values()).sort((left, right) => left.packDisplayName.localeCompare(right.packDisplayName));
+}
+
+export async function fetchPackRelationshipSummaries(): Promise<PackRelationshipSummary[]> {
+  const [packs, fleets] = await Promise.all([fetchPacks(), fetchAllFleets()]);
+  const packUsageResults = await Promise.allSettled(
+    fleets.map(async (fleet) => ({
+      fleet,
+      packs: await fetchFleetPacks(fleet.id, fleet.product),
+    })),
+  );
+
+  const packNameLookup = new Map<string, string>();
+  const summariesById = new Map<string, PackRelationshipSummary>();
+
+  const ensureSummary = (pack: Pack): PackRelationshipSummary => {
+    const key = pack.id.toLowerCase();
+    const existing = summariesById.get(key);
+
+    if (existing) {
+      const merged: PackRelationshipSummary = {
+        ...existing,
+        ...pack,
+        tags: Array.from(new Set([...(existing.tags ?? []), ...(pack.tags ?? [])])),
+        dependencies: Array.from(new Set([...(existing.dependencies ?? []), ...(pack.dependencies ?? [])])),
+        groupIds: Array.from(new Set([...(existing.groupIds ?? []), ...(pack.groupIds ?? [])])),
+        usageLocations: existing.usageLocations,
+        references: existing.references,
+        referencedBy: existing.referencedBy,
+      };
+      summariesById.set(key, merged);
+      if (merged.displayName) {
+        packNameLookup.set(key, merged.displayName);
+      }
+      return merged;
+    }
+
+    const created: PackRelationshipSummary = {
+      ...pack,
+      tags: pack.tags ?? [],
+      dependencies: pack.dependencies ?? [],
+      groupIds: pack.groupIds ?? [],
+      usageLocations: [],
+      references: [],
+      referencedBy: [],
+    };
+    summariesById.set(key, created);
+    packNameLookup.set(key, created.displayName ?? created.id);
+    return created;
+  };
+
+  packs.forEach((pack) => {
+    ensureSummary(pack);
+  });
+
+  packUsageResults.forEach((result) => {
+    if (result.status !== 'fulfilled') {
+      return;
+    }
+
+    const { fleet, packs: fleetPacks } = result.value;
+
+    fleetPacks.forEach((pack) => {
+      const summary = ensureSummary(pack);
+      summary.usageLocations.push({
+        fleetId: fleet.id,
+        fleetName: fleet.name,
+        product: fleet.product,
+        status: pack.status,
+        inheritedFrom: pack.inheritedFrom,
+        configDrift: pack.configDrift,
+        version: pack.version,
+      });
+    });
+  });
+
+  const summaries = Array.from(summariesById.values());
+
+  summaries.forEach((summary) => {
+    summary.usageLocations = dedupePackUsageLocations(summary.usageLocations);
+  });
+
+  summaries.forEach((summary) => {
+    const references = (summary.dependencies ?? []).map((dependency) => {
+      const key = dependency.toLowerCase();
+
+      return {
+        packId: dependency,
+        packDisplayName: packNameLookup.get(key) ?? dependency,
+        exists: packNameLookup.has(key),
+      } satisfies PackReference;
+    });
+
+    summary.references = dedupePackReferences(references);
+  });
+
+  const referencedByBuckets = new Map<string, PackReference[]>();
+
+  summaries.forEach((summary) => {
+    summary.references.forEach((reference) => {
+      const key = reference.packId.toLowerCase();
+      const current = referencedByBuckets.get(key) ?? [];
+      current.push({
+        packId: summary.id,
+        packDisplayName: summary.displayName ?? summary.id,
+        exists: true,
+      });
+      referencedByBuckets.set(key, current);
+    });
+  });
+
+  summaries.forEach((summary) => {
+    summary.referencedBy = dedupePackReferences(referencedByBuckets.get(summary.id.toLowerCase()) ?? []);
+  });
+
+  return summaries.sort((left, right) => (left.displayName ?? left.id).localeCompare(right.displayName ?? right.id));
+}
+
 export async function fetchPack(packId: string): Promise<Pack> {
   const item = await fetchRecord(`/packs/${encodePathSegment(packId)}`);
 
@@ -721,6 +867,16 @@ export async function fetchPackKnowledgeObjects(packId: string, groupId?: string
   const candidateGroupIds = Array.from(
     new Set(groupId ? [groupId, ...getPackGroupCandidates(resolvedPackId)] : getPackGroupCandidates(resolvedPackId)),
   );
+
+  if (groupId) {
+    for (const candidateGroupId of candidateGroupIds) {
+      try {
+        return await fetchKnowledgeObjectsForGroup(candidateGroupId, resolvedPackId);
+      } catch {
+        // Try the next available group context.
+      }
+    }
+  }
 
   try {
     return await fetchKnowledgeObjectsForBasePath(basePath, resolvedPackId);
@@ -876,6 +1032,19 @@ export async function fetchKnowledgeObjectPreview(
   );
 
   if (knowledgeObject.type === 'lookup') {
+    if (groupId) {
+      for (const candidateGroupId of candidateGroupIds) {
+        try {
+          return {
+            kind: 'lookup',
+            lookup: await fetchGroupScopedLookupContentPreview(candidateGroupId, resolvedPackId, knowledgeObject.id),
+          };
+        } catch {
+          // Try next known group context.
+        }
+      }
+    }
+
     try {
       return {
         kind: 'lookup',
@@ -898,6 +1067,19 @@ export async function fetchKnowledgeObjectPreview(
   }
 
   if (knowledgeObject.type === 'pipeline') {
+    if (groupId) {
+      for (const candidateGroupId of candidateGroupIds) {
+        try {
+          return {
+            kind: 'pipeline',
+            pipeline: await fetchGroupScopedPipelineContentPreview(candidateGroupId, resolvedPackId, knowledgeObject.id),
+          };
+        } catch {
+          // Try next known group context.
+        }
+      }
+    }
+
     try {
       return {
         kind: 'pipeline',
@@ -920,6 +1102,19 @@ export async function fetchKnowledgeObjectPreview(
   }
 
   if (knowledgeObject.type === 'route') {
+    if (groupId) {
+      for (const candidateGroupId of candidateGroupIds) {
+        try {
+          return {
+            kind: 'route',
+            route: await fetchGroupScopedRouteContentPreview(candidateGroupId, resolvedPackId, knowledgeObject.id),
+          };
+        } catch {
+          // Try next known group context.
+        }
+      }
+    }
+
     try {
       return {
         kind: 'route',

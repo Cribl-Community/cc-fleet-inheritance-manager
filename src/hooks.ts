@@ -3,7 +3,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import type { FetchError, FleetProduct, KnowledgeObject } from './types';
+import type { FetchError, FleetProduct, KnowledgeObject, PackUsageLocation } from './types';
 import { ApiError } from './api';
 import * as api from './api';
 
@@ -73,6 +73,12 @@ export function usePacks() {
   return useAsync(fetchFn);
 }
 
+export function usePackRelationshipSummaries() {
+  const fetchFn = useCallback(() => api.fetchPackRelationshipSummaries(), []);
+
+  return useAsync(fetchFn);
+}
+
 export function usePack(packId: string) {
   const fetchFn = useCallback(() => api.fetchPack(packId), [packId]);
 
@@ -90,6 +96,28 @@ export function usePackKnowledgeObjects(packId: string | null, groupId?: string)
     () => (packId ? api.fetchPackKnowledgeObjects(packId, groupId) : Promise.resolve([])),
     [groupId, packId],
   );
+
+  return useAsync(fetchFn);
+}
+
+export function usePackKnowledgeObjectInventories(
+  packId: string | null,
+  usageLocations: PackUsageLocation[],
+) {
+  const fetchFn = useCallback(async () => {
+    if (!packId || usageLocations.length === 0) {
+      return new Map<string, KnowledgeObject[]>();
+    }
+
+    const entries = await Promise.all(
+      usageLocations.map(async (usageLocation) => [
+        `${usageLocation.product}:${usageLocation.fleetId}`,
+        await api.fetchPackKnowledgeObjects(packId, usageLocation.fleetId),
+      ] as const),
+    );
+
+    return new Map<string, KnowledgeObject[]>(entries);
+  }, [packId, usageLocations]);
 
   return useAsync(fetchFn);
 }
