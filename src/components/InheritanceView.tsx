@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Text } from '@capra/core';
 import { useFleetPacks, useFleets, useKnowledgeObjectPreview, usePackKnowledgeObjects } from '../hooks';
-import type { Fleet, FleetProduct, KnowledgeObject } from '../types';
+import type { Fleet, FleetProduct, KnowledgeObject, Pack } from '../types';
 import { ErrorState } from './ErrorBoundary';
 import { FleetProductBadge } from './FleetProductBadge';
 import { KnowledgeObjectGroups } from './KnowledgeObjectGroups';
@@ -37,6 +37,15 @@ export function InheritanceView() {
   const [expandedFleets, setExpandedFleets] = useState<Set<string>>(new Set());
   const [knowledgeObjectTypeFilter, setKnowledgeObjectTypeFilter] = useState<KnowledgeObjectTypeFilter>('all');
   const [knowledgeObjectSortMode, setKnowledgeObjectSortMode] = useState<KnowledgeObjectSortMode>('name-asc');
+  const [packInventoryByKey, setPackInventoryByKey] = useState<Map<string, KnowledgeObject[]>>(new Map());
+
+  const fleetLookupById = useMemo(() => {
+    if (!fleets) {
+      return new Map<string, Fleet>();
+    }
+
+    return new Map(fleets.map((fleet) => [fleet.id, fleet]));
+  }, [fleets]);
 
   const fleetForest = useMemo(() => {
     if (!fleets) {
@@ -165,6 +174,9 @@ export function InheritanceView() {
             onToggleFleet={toggleFleet}
             knowledgeObjectTypeFilter={knowledgeObjectTypeFilter}
             knowledgeObjectSortMode={knowledgeObjectSortMode}
+            packInventoryByKey={packInventoryByKey}
+            setPackInventoryByKey={setPackInventoryByKey}
+            fleetLookupById={fleetLookupById}
           />
         ))}
       </div>
@@ -236,12 +248,18 @@ function FleetTreeNode({
   onToggleFleet,
   knowledgeObjectTypeFilter,
   knowledgeObjectSortMode,
+  packInventoryByKey,
+  setPackInventoryByKey,
+  fleetLookupById,
 }: {
   node: FleetTreeNodeModel;
   expandedFleets: Set<string>;
   onToggleFleet: (fleetId: string) => void;
   knowledgeObjectTypeFilter: KnowledgeObjectTypeFilter;
   knowledgeObjectSortMode: KnowledgeObjectSortMode;
+  packInventoryByKey: Map<string, KnowledgeObject[]>;
+  setPackInventoryByKey: React.Dispatch<React.SetStateAction<Map<string, KnowledgeObject[]>>>;
+  fleetLookupById: Map<string, Fleet>;
 }) {
   const fleetKey = `${node.fleet.product}:${node.fleet.id}`;
   const isExpanded = expandedFleets.has(fleetKey);
@@ -275,9 +293,14 @@ function FleetTreeNode({
         <div className="tree-children">
           <FleetPacksHierarchy
             fleetId={node.fleet.id}
+            fleetName={node.fleet.name}
+            fleetParentId={node.fleet.parentId}
             product={node.fleet.product}
             knowledgeObjectTypeFilter={knowledgeObjectTypeFilter}
             knowledgeObjectSortMode={knowledgeObjectSortMode}
+            packInventoryByKey={packInventoryByKey}
+            setPackInventoryByKey={setPackInventoryByKey}
+            fleetLookupById={fleetLookupById}
           />
 
           {node.children.length > 0 ? (
@@ -290,6 +313,9 @@ function FleetTreeNode({
                   onToggleFleet={onToggleFleet}
                   knowledgeObjectTypeFilter={knowledgeObjectTypeFilter}
                   knowledgeObjectSortMode={knowledgeObjectSortMode}
+                  packInventoryByKey={packInventoryByKey}
+                  setPackInventoryByKey={setPackInventoryByKey}
+                  fleetLookupById={fleetLookupById}
                 />
               ))}
             </div>
@@ -300,16 +326,212 @@ function FleetTreeNode({
   );
 }
 
+function buildKnowledgeObjectKey(knowledgeObject: Pick<KnowledgeObject, 'type' | 'id'>): string {
+  return `${knowledgeObject.type}:${knowledgeObject.id}`;
+}
+
+function compareKnowledgeObjectInventory(
+  parentInventory: KnowledgeObject[] | null | undefined,
+  childInventory: KnowledgeObject[] | null | undefined,
+): { added: KnowledgeObject[]; removed: KnowledgeObject[]; matching: KnowledgeObject[] } {
+  const parentByKey = new Map<string, KnowledgeObject>();
+  const childByKey = new Map<string, KnowledgeObject>();
+
+  (parentInventory ?? []).forEach((knowledgeObject) => {
+    parentByKey.set(buildKnowledgeObjectKey(knowledgeObject), knowledgeObject);
+  });
+
+  (childInventory ?? []).forEach((knowledgeObject) => {
+    childByKey.set(buildKnowledgeObjectKey(knowledgeObject), knowledgeObject);
+  });
+
+  const added: KnowledgeObject[] = [];
+  const removed: KnowledgeObject[] = [];
+  const matching: KnowledgeObject[] = [];
+
+  childByKey.forEach((knowledgeObject, key) => {
+    if (!parentByKey.has(key)) {
+      added.push(knowledgeObject);
+      return;
+    }
+
+    matching.push(knowledgeObject);
+  });
+
+  parentByKey.forEach((knowledgeObject, key) => {
+    if (!childByKey.has(key)) {
+      removed.push(knowledgeObject);
+    }
+  });
+
+  return { added, removed, matching };
+}
+
+function pickAncestorSourceGroup(
+  pack: Pack,
+  currentFleetId: string,
+  currentFleetParentId?: string,
+): string | undefined {
+  const candidates = Array.from(
+    new Set(
+      [pack.inheritedFrom, ...(pack.groupIds ?? []), currentFleetParentId]
+        .filter((value): value is string => Boolean(value))
+        .filter((value) => value !== currentFleetId && value !== pack.id && value !== 'default'),
+    ),
+  );
+
+  if (candidates.length === 0) {
+    return undefined;
+  }
+
+  return pack.inheritedFrom && candidates.includes(pack.inheritedFrom)
+    ? pack.inheritedFrom
+    : candidates[0];
+}
+
+function evaluatePackStatus(
+  pack: Pack,
+  childKnowledgeObjects: KnowledgeObject[] | null | undefined,
+  ancestorKnowledgeObjects: KnowledgeObject[] | null | undefined,
+  ancestorSourceGroupId: string | undefined,
+): Pack['status'] {
+  if (pack.configDrift || pack.inheritedModified) {
+    return 'inherited-modified';
+  }
+
+  const hasInheritedSource = Boolean(pack.inheritedFrom || (pack.groupIds && pack.groupIds.length > 0));
+
+  if (!hasInheritedSource) {
+    return 'local';
+  }
+
+  if (!ancestorSourceGroupId) {
+    return 'unknown';
+  }
+
+  if (!ancestorKnowledgeObjects || ancestorKnowledgeObjects.length === 0) {
+    return 'unknown';
+  }
+
+  if (!childKnowledgeObjects) {
+    return 'unknown';
+  }
+
+  const diff = compareKnowledgeObjectInventory(ancestorKnowledgeObjects, childKnowledgeObjects);
+
+  if (diff.added.length > 0 || diff.removed.length > 0) {
+    return 'inherited-modified';
+  }
+
+  return 'inherited';
+}
+
+function PackInheritanceBadge({
+  pack,
+  fleetId,
+  fleetName,
+  fleetParentId,
+  packInventoryByKey,
+  fleetLookupById,
+}: {
+  pack: Pack;
+  fleetId: string;
+  fleetName: string;
+  fleetParentId?: string;
+  packInventoryByKey: Map<string, KnowledgeObject[]>;
+  fleetLookupById: Map<string, Fleet>;
+}) {
+  const inheritedSourceGroupId = pickAncestorSourceGroup(pack, fleetId, fleetParentId);
+  const inheritedSourceFleet = inheritedSourceGroupId ? fleetLookupById.get(inheritedSourceGroupId) : undefined;
+  const childInventoryKey = `${fleetId}:${pack.id}`;
+  const ancestorInventoryKey = inheritedSourceGroupId ? `${inheritedSourceGroupId}:${pack.id}` : undefined;
+  const childKnowledgeObjects = packInventoryByKey.get(childInventoryKey) ?? [];
+  const ancestorKnowledgeObjects = ancestorInventoryKey ? packInventoryByKey.get(ancestorInventoryKey) : undefined;
+
+  const status = useMemo(
+    () => evaluatePackStatus(pack, childKnowledgeObjects, ancestorKnowledgeObjects, inheritedSourceGroupId),
+    [ancestorKnowledgeObjects, childKnowledgeObjects, inheritedSourceGroupId, pack],
+  );
+
+  const debugInfo = {
+    fleetId,
+    fleetName,
+    parentId: fleetParentId ?? '—',
+    packId: pack.id,
+    packDisplayName: pack.displayName ?? pack.id,
+    packInheritedFrom: pack.inheritedFrom ?? '—',
+    packGroupIds: pack.groupIds && pack.groupIds.length > 0 ? pack.groupIds.join(', ') : '—',
+    resolvedAncestorId: inheritedSourceGroupId ?? '—',
+    resolvedAncestorName: inheritedSourceFleet?.name ?? '—',
+  };
+
+  const debugText = `[debug] ${JSON.stringify(debugInfo)} | Child Objects: ${childKnowledgeObjects.length} | Ancestor Objects: ${ancestorKnowledgeObjects?.length ?? 0} | Status: ${status}`;
+
+  console.debug('[inheritance-ancestor-discovery]', debugInfo);
+
+  if (status === 'inherited-modified') {
+    return (
+      <>
+        <span className="inheritance-pill">Inherited modified</span>
+        <div className="section-copy" style={{ marginTop: '0.25rem' }}>
+          <Text variant="body-xs-normal" color="secondary">{debugText}</Text>
+        </div>
+      </>
+    );
+  }
+
+  if (status === 'inherited') {
+    return (
+      <>
+        <span className="inheritance-pill">Inherited</span>
+        <div className="section-copy" style={{ marginTop: '0.25rem' }}>
+          <Text variant="body-xs-normal" color="secondary">{debugText}</Text>
+        </div>
+      </>
+    );
+  }
+
+  if (status === 'unknown') {
+    return (
+      <>
+        <span className="pill pill-subtle">Verification pending</span>
+        <div className="section-copy" style={{ marginTop: '0.25rem' }}>
+          <Text variant="body-xs-normal" color="secondary">{debugText}</Text>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <span className="pill pill-subtle">Local</span>
+      <div className="section-copy" style={{ marginTop: '0.25rem' }}>
+        <Text variant="body-xs-normal" color="secondary">{debugText}</Text>
+      </div>
+    </>
+  );
+}
+
 function FleetPacksHierarchy({
   fleetId,
+  fleetName,
+  fleetParentId,
   product,
   knowledgeObjectTypeFilter,
   knowledgeObjectSortMode,
+  packInventoryByKey,
+  setPackInventoryByKey,
+  fleetLookupById,
 }: {
   fleetId: string;
+  fleetName: string;
+  fleetParentId?: string;
   product: FleetProduct;
   knowledgeObjectTypeFilter: KnowledgeObjectTypeFilter;
   knowledgeObjectSortMode: KnowledgeObjectSortMode;
+  packInventoryByKey: Map<string, KnowledgeObject[]>;
+  setPackInventoryByKey: React.Dispatch<React.SetStateAction<Map<string, KnowledgeObject[]>>>;
+  fleetLookupById: Map<string, Fleet>;
 }) {
   const { data: fleetPacks, loading, error, retry } = useFleetPacks(fleetId, product);
   const [expandedPacks, setExpandedPacks] = useState<Set<string>>(new Set());
@@ -360,13 +582,14 @@ function FleetPacksHierarchy({
               <div className="tree-copy">
                 <div className="list-card-header">
                   <Text variant="body-sm-semibold">{pack.displayName || pack.id}</Text>
-                  {pack.status === 'inherited-modified' ? (
-                    <span className="inheritance-pill">Inherited modified</span>
-                  ) : pack.status === 'inherited' ? (
-                    <span className="inheritance-pill">Inherited</span>
-                  ) : pack.status === 'local' ? (
-                    <span className="pill pill-subtle">Local</span>
-                  ) : null}
+                  <PackInheritanceBadge
+                    pack={pack}
+                    fleetId={fleetId}
+                    fleetName={fleetName}
+                    fleetParentId={fleetParentId}
+                    packInventoryByKey={packInventoryByKey}
+                    fleetLookupById={fleetLookupById}
+                  />
                 </div>
                 {pack.version ? (
                   <div className="section-copy">
@@ -384,6 +607,7 @@ function FleetPacksHierarchy({
                 fleetId={fleetId}
                 knowledgeObjectTypeFilter={knowledgeObjectTypeFilter}
                 knowledgeObjectSortMode={knowledgeObjectSortMode}
+                setPackInventoryByKey={setPackInventoryByKey}
               />
             ) : null}
           </div>
@@ -398,11 +622,13 @@ function PackKnowledgeObjectsList({
   fleetId,
   knowledgeObjectTypeFilter,
   knowledgeObjectSortMode,
+  setPackInventoryByKey,
 }: {
   packId: string;
   fleetId: string;
   knowledgeObjectTypeFilter: KnowledgeObjectTypeFilter;
   knowledgeObjectSortMode: KnowledgeObjectSortMode;
+  setPackInventoryByKey: React.Dispatch<React.SetStateAction<Map<string, KnowledgeObject[]>>>;
 }) {
   const { data: knowledgeObjects, loading, error, retry } = usePackKnowledgeObjects(packId, fleetId);
   const [selectedKnowledgeObject, setSelectedKnowledgeObject] = useState<KnowledgeObject | null>(null);
@@ -425,6 +651,18 @@ function PackKnowledgeObjectsList({
 
     return sortKnowledgeObjectsByName(filtered, knowledgeObjectSortMode);
   }, [knowledgeObjectSortMode, knowledgeObjectTypeFilter, knowledgeObjects]);
+
+  useEffect(() => {
+    if (!knowledgeObjects) {
+      return;
+    }
+
+    setPackInventoryByKey((current) => {
+      const next = new Map(current);
+      next.set(`${fleetId}:${packId}`, knowledgeObjects);
+      return next;
+    });
+  }, [fleetId, knowledgeObjects, packId, setPackInventoryByKey]);
 
   useEffect(() => {
     setSelectedKnowledgeObject(null);

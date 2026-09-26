@@ -241,8 +241,8 @@ function getPackGroupCandidates(packId: string): string[] {
   return Array.from(packGroupCandidates.get(packId.toLowerCase()) ?? []);
 }
 
-function resolvePackInheritanceStatus(pack: Pick<Pack, 'groupIds' | 'inheritedFrom' | 'inheritedModified'>): Pack['status'] {
-  if (pack.inheritedModified) {
+function resolvePackInheritanceStatus(pack: Pick<Pack, 'groupIds' | 'inheritedFrom' | 'inheritedModified' | 'configDrift'>): Pack['status'] {
+  if (pack.inheritedModified || pack.configDrift) {
     return 'inherited-modified';
   }
 
@@ -271,6 +271,7 @@ function mapPack(item: ApiRecord, groupId?: string): Pack {
     groupIds,
     inheritedFrom,
     inheritedModified,
+    configDrift: false,
     status: undefined,
     source: isRecord(item.source)
       ? {
@@ -431,6 +432,7 @@ function dedupePacks(packs: Pack[]): Pack[] {
         groupIds: pack.groupIds ? [...pack.groupIds] : undefined,
         inheritedFrom: pack.inheritedFrom,
         inheritedModified: Boolean(pack.inheritedModified),
+        configDrift: Boolean(pack.configDrift),
         status: resolvePackInheritanceStatus(pack),
       };
       byId.set(key, normalized);
@@ -444,6 +446,7 @@ function dedupePacks(packs: Pack[]): Pack[] {
       groupIds: mergedGroupIds.size > 0 ? Array.from(mergedGroupIds) : undefined,
       inheritedFrom: pack.inheritedFrom ?? existing.inheritedFrom,
       inheritedModified: Boolean(pack.inheritedModified || existing.inheritedModified),
+      configDrift: Boolean(pack.configDrift || existing.configDrift),
     };
     mergedPack.status = resolvePackInheritanceStatus(mergedPack);
 
@@ -482,6 +485,68 @@ async function fetchGroupScopedJson(groupId: string, endpoint: string): Promise<
   return handleResponse<unknown>(response);
 }
 
+function normalizeRouteEntries(items: ApiRecord[]): Array<Record<string, unknown>> {
+  return items.flatMap((item) => {
+    if (!Array.isArray(item.routes)) {
+      return [];
+    }
+
+    return item.routes.filter(isRecord).map((route) => ({
+      id: readString(route.id) ?? readString(route.name) ?? 'default',
+      name: readString(route.name) ?? readString(route.id) ?? 'default',
+      filter: readString(route.filter),
+      pipeline: readString(route.pipeline),
+      output: readString(route.output),
+      description: readString(route.description),
+      final: typeof route.final === 'boolean' ? route.final : undefined,
+      disabled: typeof route.disabled === 'boolean' ? route.disabled : undefined,
+    }));
+  });
+}
+
+function routeSignature(entries: Array<Record<string, unknown>>): string {
+  return JSON.stringify(entries.map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    filter: entry.filter,
+    pipeline: entry.pipeline,
+    output: entry.output,
+    description: entry.description,
+    final: entry.final,
+    disabled: entry.disabled,
+  })));
+}
+
+async function detectPackConfigDrift(groupId: string, packId: string, sourceGroupIds: string[] = []): Promise<boolean> {
+  const uniqueSourceGroupIds = Array.from(
+    new Set(sourceGroupIds.filter((candidate): candidate is string => Boolean(candidate && candidate !== groupId))),
+  );
+
+  if (uniqueSourceGroupIds.length === 0) {
+    return false;
+  }
+
+  try {
+    const routeComparisons = await Promise.all(
+      uniqueSourceGroupIds.map(async (sourceGroupId) => {
+        const [sourceRoutes, targetRoutes] = await Promise.all([
+          fetchGroupScopedCollectionStrict(sourceGroupId, `/p/${encodePathSegment(packId)}/routes`),
+          fetchGroupScopedCollectionStrict(groupId, `/p/${encodePathSegment(packId)}/routes`),
+        ]);
+
+        const sourceEntries = normalizeRouteEntries(sourceRoutes);
+        const targetEntries = normalizeRouteEntries(targetRoutes);
+
+        return routeSignature(sourceEntries) !== routeSignature(targetEntries);
+      }),
+    );
+
+    return routeComparisons.some(Boolean);
+  } catch {
+    return false;
+  }
+}
+
 async function fetchFleetPackEntries(product: FleetProduct): Promise<Pack[]> {
   const groups = await fetchCollection(`/products/${product}/groups`);
   const packs: Pack[] = [];
@@ -494,7 +559,25 @@ async function fetchFleetPackEntries(product: FleetProduct): Promise<Pack[]> {
 
     const groupScopedPacks = await fetchGroupScopedCollection(groupId, '/packs');
     if (groupScopedPacks.length > 0) {
-      packs.push(...groupScopedPacks.map((item) => mapPack(item, groupId)));
+      const mapped = await Promise.all(groupScopedPacks.map(async (item) => {
+        const pack = mapPack(item, groupId);
+        const sourceCandidates = Array.from(
+          new Set([
+            ...(pack.inheritedFrom ? [pack.inheritedFrom] : []),
+            ...getPackGroupCandidates(pack.id),
+            ...(pack.groupIds ?? []),
+          ]),
+        );
+
+        if (sourceCandidates.length > 0) {
+          pack.configDrift = await detectPackConfigDrift(groupId, pack.id, sourceCandidates);
+          pack.status = resolvePackInheritanceStatus(pack);
+        }
+
+        return pack;
+      }));
+
+      packs.push(...mapped);
       continue;
     }
 
@@ -509,6 +592,7 @@ async function fetchFleetPackEntries(product: FleetProduct): Promise<Pack[]> {
               displayName: packItem,
               groupIds: [groupId],
               inheritedFrom: groupId,
+              configDrift: false,
               status: 'inherited',
             });
             return;

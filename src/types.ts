@@ -29,7 +29,8 @@ export interface Pack {
   groupIds?: string[];
   inheritedFrom?: string;
   inheritedModified?: boolean;
-  status?: 'local' | 'inherited' | 'inherited-modified';
+  configDrift?: boolean;
+  status?: 'local' | 'inherited' | 'inherited-modified' | 'unknown';
   source?: {
     type: string;
     location?: string;
