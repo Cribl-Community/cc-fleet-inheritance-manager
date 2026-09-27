@@ -17,6 +17,7 @@ import type {
   PipelineContentPreview,
   RouteContentPreview,
 } from './types';
+import { rewritePackArchive, type PackMetadataEdits } from './packArchive.ts';
 
 type ApiRecord = Record<string, unknown>;
 const FLEET_PRODUCTS: FleetProduct[] = ['stream', 'edge'];
@@ -31,6 +32,14 @@ class ApiError extends Error {
     this.name = 'ApiError';
     this.status = status;
     this.details = details;
+  }
+}
+
+/** Cribl failed to build the temporary package for a `merge` export. */
+export class PackExportAssemblyError extends ApiError {
+  constructor(message: string, status: number, details?: unknown) {
+    super(message, status, details);
+    this.name = 'PackExportAssemblyError';
   }
 }
 
@@ -810,15 +819,17 @@ export async function exportPack(
   filename?: string,
   groupId?: string,
 ): Promise<Blob> {
+  const filenameQuery = encodeURIComponent(filename ?? `${packId}.crbl`);
   const exportEndpoints = [
-    groupId ? `${requireBaseUrl()}/m/${encodeURIComponent(groupId)}/packs/${encodePathSegment(packId)}/export?mode=${encodeURIComponent(mode)}&filename=${encodeURIComponent(filename ?? `${packId}.crbl`)}` : undefined,
-    `${requireBaseUrl()}/packs/${encodePathSegment(packId)}/export?mode=${encodeURIComponent(mode)}&filename=${encodeURIComponent(filename ?? `${packId}.crbl`)}`,
+    groupId ? `${requireBaseUrl()}/m/${encodeURIComponent(groupId)}/packs/${encodePathSegment(packId)}/export` : undefined,
+    `${requireBaseUrl()}/packs/${encodePathSegment(packId)}/export`,
   ].filter((endpoint): endpoint is string => Boolean(endpoint));
 
-  let lastError: { status: number; details: string } | undefined;
+  let lastError: { status: number; details: string; url: string } | undefined;
 
   for (const endpoint of exportEndpoints) {
-    const response = await fetch(endpoint);
+    const url = `${endpoint}?mode=${encodeURIComponent(mode)}&filename=${filenameQuery}`;
+    const response = await fetch(url);
 
     if (response.ok) {
       return response.blob();
@@ -826,23 +837,39 @@ export async function exportPack(
 
     const raw = await response.text();
     const details = raw ? raw : `HTTP ${response.status}`;
-    lastError = { status: response.status, details };
+    lastError = { status: response.status, details, url };
 
-    if (response.status !== 404) {
-      throw new ApiError(`Failed to export pack ${packId}: ${details}`, response.status, details);
+    if (response.status === 404) {
+      continue;
     }
+
+    const lowered = details.toLowerCase();
+    if (lowered.includes('enoent') && lowered.includes('package.json')) {
+      throw new PackExportAssemblyError(
+        `Failed to export pack ${packId} (${mode} mode): Cribl could not assemble the temporary package. Endpoint: ${url}. Original error: ${details}`,
+        response.status,
+        details,
+      );
+    }
+
+    throw new ApiError(`Failed to export pack ${packId}: ${details} (endpoint: ${url})`, response.status, details);
   }
 
   if (lastError) {
-    throw new ApiError(`Failed to export pack ${packId}: ${lastError.details}`, lastError.status, lastError.details);
+    throw new ApiError(
+      `Failed to export pack ${packId}: ${lastError.details} (endpoint: ${lastError.url})`,
+      lastError.status,
+      lastError.details,
+    );
   }
 
   throw new ApiError(`Failed to export pack ${packId}: Not Found`, 404, 'Not Found');
 }
 
-export async function uploadPack(file: File | Blob, filename?: string): Promise<string> {
+export async function uploadPack(file: File | Blob, filename?: string, groupId?: string): Promise<string> {
   const payloadFile = file instanceof File ? file : new File([file], filename ?? 'pack.crbl', { type: 'application/octet-stream' });
-  const response = await fetch(`${requireBaseUrl()}/packs?filename=${encodeURIComponent(payloadFile.name)}`, {
+  const packsEndpoint = groupId ? `${requireBaseUrl()}/m/${encodeURIComponent(groupId)}/packs` : `${requireBaseUrl()}/packs`;
+  const response = await fetch(`${packsEndpoint}?filename=${encodeURIComponent(payloadFile.name)}`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/octet-stream',
@@ -860,9 +887,59 @@ export async function uploadPack(file: File | Blob, filename?: string): Promise<
   return source;
 }
 
-export async function stagePackForUpgrade(packId: string, groupId?: string): Promise<string> {
-  const exported = await exportPack(packId, 'merge', `${packId}.crbl`, groupId);
-  return uploadPack(exported, `${packId}.crbl`);
+export interface PublishPackEditsResult {
+  pack: Pack;
+  previousVersion: string;
+  newVersion: string;
+  exportMode: 'merge' | 'default_only';
+  warnings: string[];
+}
+
+/**
+ * Export the installed pack, rewrite its package.json with the edits (and a
+ * patch version bump), upload the new archive, and upgrade the pack to it.
+ * `default_only` export is used only when explicitly allowed, because it drops
+ * local modifications made to the pack.
+ */
+export async function publishPackEdits(
+  packId: string,
+  edits: PackMetadataEdits,
+  options: { groupId?: string; allowOriginalConfigExport?: boolean; onProgress?: (step: string) => void } = {},
+): Promise<PublishPackEditsResult> {
+  const { groupId, allowOriginalConfigExport = false, onProgress } = options;
+  const filename = `${packId}.crbl`;
+
+  onProgress?.('Exporting the installed pack…');
+  let exportMode: PublishPackEditsResult['exportMode'] = 'merge';
+  let exported: Blob;
+
+  try {
+    exported = await exportPack(packId, 'merge', filename, groupId);
+  } catch (error) {
+    if (!(error instanceof PackExportAssemblyError) || !allowOriginalConfigExport) {
+      throw error;
+    }
+
+    onProgress?.('Exporting the original pack configuration…');
+    exportMode = 'default_only';
+    exported = await exportPack(packId, 'default_only', filename, groupId);
+  }
+
+  onProgress?.('Applying your edits to package.json…');
+  const rewritten = await rewritePackArchive(new Uint8Array(await exported.arrayBuffer()), edits);
+
+  onProgress?.(`Uploading version ${rewritten.newVersion}…`);
+  const source = await uploadPack(new Blob([rewritten.archive]), filename, groupId);
+
+  onProgress?.(`Installing version ${rewritten.newVersion}…`);
+  const pack = await updatePack(packId, source, { minor: true, allowCustomFunctions: true, groupId });
+
+  const warnings = [...rewritten.warnings];
+  if (exportMode === 'default_only') {
+    warnings.push('Local modifications to this pack were not included, because only the original pack configuration could be exported.');
+  }
+
+  return { pack, previousVersion: rewritten.previousVersion, newVersion: rewritten.newVersion, exportMode, warnings };
 }
 
 export async function updatePack(
@@ -870,41 +947,68 @@ export async function updatePack(
   source: string,
   options: Partial<{ minor: boolean; allowCustomFunctions: boolean; spec: string; groupId: string }> = {},
 ): Promise<Pack> {
-  const endpoint = options.groupId
-    ? `${requireBaseUrl()}/m/${encodeURIComponent(options.groupId)}/packs/${encodePathSegment(packId)}`
-    : `${requireBaseUrl()}/packs/${encodePathSegment(packId)}`;
+  const endpoints = [
+    options.groupId ? `${requireBaseUrl()}/m/${encodeURIComponent(options.groupId)}/packs/${encodePathSegment(packId)}` : undefined,
+    `${requireBaseUrl()}/packs/${encodePathSegment(packId)}`,
+  ].filter((endpoint): endpoint is string => Boolean(endpoint));
 
-  try {
-    const response = await fetch(endpoint, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        source,
-        minor: options.minor ?? true,
-        allowCustomFunctions: options.allowCustomFunctions ?? true,
-        ...(options.spec ? { spec: options.spec } : {}),
-      }),
-    });
+  let lastError: { status: number; details: string } | undefined;
 
-    const payload = await handleResponse<unknown>(response);
-    const item = getCollectionItems(payload)[0] ?? (isRecord(payload) ? payload : undefined);
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          source,
+          minor: options.minor ?? true,
+          allowCustomFunctions: options.allowCustomFunctions ?? true,
+          ...(options.spec ? { spec: options.spec } : {}),
+        }),
+      });
 
-    if (!item) {
-      throw new ApiError(`Unexpected pack upgrade response for ${packId}`, response.status, payload);
+      if (!response.ok) {
+        const raw = await response.text();
+        const details = raw ? raw : `HTTP ${response.status}`;
+        lastError = { status: response.status, details };
+
+        if (response.status !== 404) {
+          throw new ApiError(`Failed to update pack ${packId}: ${details}`, response.status, details);
+        }
+
+        continue;
+      }
+
+      const payload = await handleResponse<unknown>(response);
+      const item = getCollectionItems(payload)[0] ?? (isRecord(payload) ? payload : undefined);
+
+      if (!item) {
+        throw new ApiError(`Unexpected pack upgrade response for ${packId}`, response.status, payload);
+      }
+
+      return mapPack(item);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (/up to date|already up to date/i.test(message)) {
+        return fetchPack(packId);
+      }
+
+      if (error instanceof ApiError && error.status === 404) {
+        continue;
+      }
+
+      throw error;
     }
-
-    return mapPack(item);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-
-    if (/up to date|already up to date/i.test(message)) {
-      return fetchPack(packId);
-    }
-
-    throw error;
   }
+
+  if (lastError) {
+    throw new ApiError(`Failed to update pack ${packId}: ${lastError.details}`, lastError.status, lastError.details);
+  }
+
+  throw new ApiError(`Failed to update pack ${packId}: Not Found`, 404, 'Not Found');
 }
 
 async function resolvePackId(packId: string): Promise<string> {

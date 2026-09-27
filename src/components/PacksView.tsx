@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Text } from '@capra/core';
-import { stagePackForUpgrade, updatePack } from '../api';
-import type { FleetProduct, KnowledgeObject, PackReference, PackRelationshipSummary, PackUsageLocation } from '../types';
+import { PackExportAssemblyError, publishPackEdits } from '../api';
+import { bumpPatchVersion, type PackMetadataEdits } from '../packArchive';
+import type { FleetProduct, KnowledgeObject, Pack, PackReference, PackRelationshipSummary, PackUsageLocation } from '../types';
 import { FleetProductBadge } from './FleetProductBadge';
 import {
   useKnowledgeObjectPreview,
@@ -12,6 +13,26 @@ import {
 import { ErrorState } from './ErrorBoundary';
 import { KnowledgeObjectGroups } from './KnowledgeObjectGroups';
 import { EmptyState, SkeletonLoader } from './LoadingState';
+
+interface PackDraft {
+  displayName: string;
+  description: string;
+  author: string;
+  tags: string;
+}
+
+function buildPackDraft(pack: Pack): PackDraft {
+  return {
+    displayName: pack.displayName ?? pack.id,
+    description: pack.description ?? '',
+    author: pack.author ?? '',
+    tags: pack.tags?.join(', ') ?? '',
+  };
+}
+
+function parseTags(value: string): string[] {
+  return value.split(',').map((tag) => tag.trim()).filter(Boolean);
+}
 
 const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
 const PACK_VIEW_MODES = ['catalog', 'sankey'] as const;
@@ -78,31 +99,6 @@ function sortKnowledgeObjectsByName(
   return next;
 }
 
-export function isReusablePackSource(source: string): boolean {
-  const trimmed = source.trim();
-
-  if (!trimmed) {
-    return false;
-  }
-
-  if (trimmed.startsWith('file:') || trimmed.startsWith('data:')) {
-    return false;
-  }
-
-  if (trimmed.startsWith('/') || trimmed.startsWith('\\') || /^[a-zA-Z]:[\\/]/.test(trimmed)) {
-    return false;
-  }
-
-  if (/\.(crbl|zip)$/i.test(trimmed)) {
-    return true;
-  }
-
-  return /^staged:/i.test(trimmed)
-    || /^git@/i.test(trimmed)
-    || /^git\+https?:\/\//i.test(trimmed)
-    || /^https?:\/\//i.test(trimmed);
-}
-
 export function PacksView() {
   const { data: packs, loading, error, retry } = usePackRelationshipSummaries();
   const [searchTerm, setSearchTerm] = useState('');
@@ -113,14 +109,9 @@ export function PacksView() {
   const [updatingPackId, setUpdatingPackId] = useState<string | null>(null);
   const [updatePackMessage, setUpdatePackMessage] = useState<string | null>(null);
   const [isEditingPack, setIsEditingPack] = useState(false);
-  const [packSourceMode, setPackSourceMode] = useState<'current' | 'custom-url' | 'git-url' | 'source-id'>('current');
-  const [packDraft, setPackDraft] = useState<{
-    displayName: string;
-    description: string;
-    author: string;
-    tags: string;
-    source: string;
-  } | null>(null);
+  const [isConfirmingOverwrite, setIsConfirmingOverwrite] = useState(false);
+  const [allowOriginalConfigExport, setAllowOriginalConfigExport] = useState(false);
+  const [packDraft, setPackDraft] = useState<PackDraft | null>(null);
 
   const filteredPacks = useMemo(() => {
     if (!packs) {
@@ -166,6 +157,7 @@ export function PacksView() {
     [selectedUsageContextKey, visibleUsageLocations],
   );
   const selectedGroupId = selectedUsageLocation?.fleetId;
+  const selectedPackGroupId = selectedUsageLocation?.inheritedFrom ?? selectedGroupId ?? selectedPack?.groupIds?.[0];
   const {
     data: knowledgeObjects,
     loading: koLoading,
@@ -252,18 +244,10 @@ export function PacksView() {
       return;
     }
 
-    const currentSource = selectedPack.source?.location ?? '';
-    const isLocalTempSource = currentSource.startsWith('file:');
-
-    setPackDraft({
-      displayName: selectedPack.displayName ?? selectedPack.id,
-      description: selectedPack.description ?? '',
-      author: selectedPack.author ?? '',
-      tags: selectedPack.tags?.join(', ') ?? '',
-      source: isLocalTempSource ? '' : currentSource,
-    });
-    setPackSourceMode(isLocalTempSource ? 'custom-url' : currentSource ? 'current' : 'custom-url');
+    setPackDraft(buildPackDraft(selectedPack));
     setIsEditingPack(false);
+    setIsConfirmingOverwrite(false);
+    setAllowOriginalConfigExport(false);
 
     if (visibleUsageLocations.length === 0) {
       setSelectedUsageContextKey(null);
@@ -281,65 +265,34 @@ export function PacksView() {
     }
   }, [selectedPack, selectedUsageContextKey, visibleUsageLocations]);
 
-  const resolvePackSource = useCallback(() => {
-    if (!packDraft) {
-      return '';
+  const packEdits = useMemo((): PackMetadataEdits => {
+    if (!selectedPack || !packDraft) {
+      return {};
     }
 
-    if (packSourceMode === 'current') {
-      return selectedPack?.source?.location?.trim() ?? '';
+    const original = buildPackDraft(selectedPack);
+    const edits: PackMetadataEdits = {};
+
+    if (packDraft.displayName !== original.displayName) {
+      edits.displayName = packDraft.displayName.trim();
+    }
+    if (packDraft.description !== original.description) {
+      edits.description = packDraft.description;
+    }
+    if (packDraft.author !== original.author) {
+      edits.author = packDraft.author.trim();
+    }
+    if (parseTags(packDraft.tags).join(',') !== parseTags(original.tags).join(',')) {
+      edits.tags = parseTags(packDraft.tags);
     }
 
-    return packDraft.source.trim();
-  }, [packDraft, packSourceMode, selectedPack]);
+    return edits;
+  }, [packDraft, selectedPack]);
 
-  const isReusablePackSource = useCallback((source: string): boolean => isReusablePackSource(source), []);
-
-  const handlePackDraftChange = useCallback(
-    (field: keyof NonNullable<typeof packDraft>, value: string) => {
-      setPackDraft((current) => (current ? { ...current, [field]: value } : current));
-    },
-    [],
-  );
-
-  const handleSourceModeChange = useCallback((nextMode: 'current' | 'custom-url' | 'git-url' | 'source-id') => {
-    setPackSourceMode(nextMode);
-
-    if (!selectedPack) {
-      return;
-    }
-
-    if (nextMode === 'current') {
-      setPackDraft((current) => ({
-        displayName: current?.displayName ?? selectedPack.displayName ?? selectedPack.id,
-        description: current?.description ?? selectedPack.description ?? '',
-        author: current?.author ?? selectedPack.author ?? '',
-        tags: current?.tags ?? selectedPack.tags?.join(', ') ?? '',
-        source: selectedPack.source?.location ?? '',
-      }));
-    }
-  }, [selectedPack]);
-
-  const handleAutoStageSource = useCallback(async () => {
-    if (!selectedPack) {
-      return;
-    }
-
-    setUpdatePackMessage(null);
-    setUpdatingPackId(selectedPack.id);
-
-    try {
-      const source = await stagePackForUpgrade(selectedPack.id, selectedPack.groupIds?.[0]);
-      setPackDraft((current) => (current ? { ...current, source } : current));
-      setPackSourceMode('source-id');
-      setUpdatePackMessage(`Generated a reusable source for ${selectedPack.displayName ?? selectedPack.id}.`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Pack source generation failed.';
-      setUpdatePackMessage(message);
-    } finally {
-      setUpdatingPackId(null);
-    }
-  }, [selectedPack]);
+  const handlePackDraftChange = useCallback((field: keyof PackDraft, value: string) => {
+    setPackDraft((current) => (current ? { ...current, [field]: value } : current));
+    setIsConfirmingOverwrite(false);
+  }, []);
 
   const handlePublishPack = useCallback(async () => {
     if (!selectedPack || !packDraft) {
@@ -347,52 +300,62 @@ export function PacksView() {
       return;
     }
 
-    const source = resolvePackSource();
+    const changedFields = Object.keys(packEdits);
+    const packLabel = selectedPack.displayName ?? selectedPack.id;
 
-    if (!source) {
-      setUpdatePackMessage('Choose or enter a pack source before publishing.');
+    if (changedFields.length === 0) {
+      setUpdatePackMessage('No changes to publish. Edit a field first.');
       return;
     }
 
-    if (!isReusablePackSource(source)) {
-      setUpdatePackMessage('This source is not reusable. Generate a source first, or enter a direct .crbl URL or Git URL before publishing.');
-      return;
-    }
-
-    const confirmed = window.confirm(
-      `Publish changes for "${selectedPack.displayName ?? selectedPack.id}" using this source:\n${source}\n\nThis replaces the installed pack contents and cannot be undone.`,
-    );
-
-    if (!confirmed) {
-      setUpdatePackMessage('Overwrite cancelled by user.');
-      return;
-    }
-
-    setUpdatingPackId(selectedPack.id);
-    setUpdatePackMessage('Sending pack overwrite request...');
-
-    try {
-      const updatedPack = await updatePack(selectedPack.id, source, {
-        minor: true,
-        allowCustomFunctions: true,
-        groupId: selectedPack.groupIds?.[0],
-      });
-
-      if (updatedPack.version && selectedPack.version && updatedPack.version === selectedPack.version) {
-        setUpdatePackMessage(`${selectedPack.displayName ?? selectedPack.id} is already up to date (version ${updatedPack.version}).`);
-      } else {
-        setUpdatePackMessage(`Published updates for ${selectedPack.displayName ?? selectedPack.id}.`);
+    if (!isConfirmingOverwrite) {
+      let nextVersion = 'the next patch version';
+      try {
+        nextVersion = bumpPatchVersion(selectedPack.version);
+      } catch {
+        // The exported package.json version is authoritative; it is checked during publish.
       }
 
+      setIsConfirmingOverwrite(true);
+      setUpdatePackMessage(
+        `This will replace "${packLabel}" in group "${selectedPackGroupId ?? 'default'}" with version ${nextVersion}, changing: ${changedFields.join(', ')}. ` +
+          `${allowOriginalConfigExport ? 'Local modifications to this pack will be discarded. ' : ''}This cannot be undone. Click Confirm overwrite to continue.`,
+      );
+      return;
+    }
+
+    setIsConfirmingOverwrite(false);
+    setUpdatingPackId(selectedPack.id);
+
+    try {
+      const result = await publishPackEdits(selectedPack.id, packEdits, {
+        groupId: selectedPackGroupId,
+        allowOriginalConfigExport,
+        onProgress: setUpdatePackMessage,
+      });
+
+      const installedVersion = result.pack.version;
+      const outcome = installedVersion === result.newVersion
+        ? `Published "${packLabel}": Cribl now reports version ${installedVersion} (was ${result.previousVersion}).`
+        : `Upload finished, but Cribl reports version ${installedVersion ?? 'unknown'} instead of ${result.newVersion}. Check the pack in Cribl before relying on this change.`;
+
+      setUpdatePackMessage([outcome, ...result.warnings].join(' '));
+      setAllowOriginalConfigExport(false);
       setIsEditingPack(false);
       retry();
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Publish failed.';
-      setUpdatePackMessage(message);
+      if (error instanceof PackExportAssemblyError) {
+        setAllowOriginalConfigExport(true);
+        setUpdatePackMessage(
+          `${error.message} You can publish from the original pack configuration instead, but that discards any local modifications to this pack. Click Publish again to review that option.`,
+        );
+      } else {
+        setUpdatePackMessage(error instanceof Error ? error.message : 'Publish failed.');
+      }
     } finally {
       setUpdatingPackId(null);
     }
-  }, [isReusablePackSource, packDraft, resolvePackSource, retry, selectedPack]);
+  }, [allowOriginalConfigExport, isConfirmingOverwrite, packDraft, packEdits, retry, selectedPack, selectedPackGroupId]);
 
   useEffect(() => {
     if (
@@ -838,43 +801,66 @@ export function PacksView() {
               <button
                 type="button"
                 className="pill"
-                onClick={() => setIsEditingPack((current) => !current)}
+                onClick={() => {
+                  if (isEditingPack) {
+                    setPackDraft(buildPackDraft(selectedPack));
+                    setUpdatePackMessage(null);
+                    setAllowOriginalConfigExport(false);
+                  }
+                  setIsEditingPack((current) => !current);
+                  setIsConfirmingOverwrite(false);
+                }}
+                disabled={updatingPackId === selectedPack.id}
               >
                 {isEditingPack ? 'Cancel edit' : 'Edit'}
               </button>
-              <button
-                type="button"
-                className="pill"
-                onClick={handlePublishPack}
-                disabled={updatingPackId === selectedPack.id}
-              >
-                {updatingPackId === selectedPack.id ? 'Publishing…' : isEditingPack ? 'Publish overwrite' : 'Overwrite selected pack'}
-              </button>
+              {isEditingPack ? (
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={handlePublishPack}
+                  disabled={updatingPackId === selectedPack.id}
+                >
+                  {updatingPackId === selectedPack.id
+                    ? 'Publishing…'
+                    : isConfirmingOverwrite
+                      ? 'Confirm overwrite'
+                      : 'Publish'}
+                </button>
+              ) : null}
             </div>
+
+            {updatePackMessage ? (
+              <div style={{ marginTop: '0.75rem' }} role="status" aria-live="polite">
+                <Text variant="body-xs-normal" color="secondary">
+                  {updatePackMessage}
+                </Text>
+              </div>
+            ) : null}
 
             {isEditingPack && packDraft ? (
               <div className="detail-section" style={{ marginTop: '1rem' }}>
                 <Text as="h3" variant="heading-sm">
-                  Overwrite selected pack
+                  Edit pack metadata
                 </Text>
                 <div className="metadata-grid" style={{ marginTop: '0.75rem' }}>
                   <label className="metadata-row">
                     <Text variant="body-xs-semibold" color="secondary">
-                      Target pack
+                      Target group
                     </Text>
                     <input
                       className="search-input"
-                      value={selectedPack.displayName ?? selectedPack.id}
+                      value={selectedPackGroupId ?? 'default'}
                       readOnly
                     />
                   </label>
                   <label className="metadata-row">
                     <Text variant="body-xs-semibold" color="secondary">
-                      Current source
+                      Current version
                     </Text>
                     <input
                       className="search-input"
-                      value={selectedPack.source?.location ?? '—'}
+                      value={selectedPack.version ?? '—'}
                       readOnly
                     />
                   </label>
@@ -911,7 +897,7 @@ export function PacksView() {
                   </label>
                   <label className="metadata-row">
                     <Text variant="body-xs-semibold" color="secondary">
-                      Tags
+                      Tags (comma-separated)
                     </Text>
                     <input
                       className="search-input"
@@ -919,58 +905,6 @@ export function PacksView() {
                       onChange={(event) => handlePackDraftChange('tags', event.target.value)}
                     />
                   </label>
-                  <label className="metadata-row">
-                    <Text variant="body-xs-semibold" color="secondary">
-                      Source type
-                    </Text>
-                    <select
-                      className="search-input"
-                      value={packSourceMode}
-                      onChange={(event) => handleSourceModeChange(event.target.value as 'current' | 'custom-url' | 'git-url' | 'source-id')}
-                    >
-                      <option value="current">Current installed source</option>
-                      <option value="custom-url">Custom .crbl URL</option>
-                      <option value="git-url">Git repo URL</option>
-                      <option value="source-id">Staged source ID</option>
-                    </select>
-                  </label>
-                  <label className="metadata-row" style={{ gridColumn: '1 / -1' }}>
-                    <Text variant="body-xs-semibold" color="secondary">
-                      Overwrite source
-                    </Text>
-                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', width: '100%' }}>
-                      <input
-                        className="search-input"
-                        value={packDraft.source}
-                        onChange={(event) => handlePackDraftChange('source', event.target.value)}
-                        placeholder={
-                          packSourceMode === 'current'
-                            ? 'Current installed source'
-                            : packSourceMode === 'custom-url'
-                              ? 'https://example.com/pack.crbl'
-                              : packSourceMode === 'git-url'
-                                ? 'git+https://github.com/org/repo.git'
-                                : 'staged-source-id'
-                        }
-                        style={{ flex: 1 }}
-                      />
-                      <button
-                        type="button"
-                        className="pill"
-                        onClick={handleAutoStageSource}
-                        disabled={updatingPackId === selectedPack.id}
-                      >
-                        {updatingPackId === selectedPack.id ? 'Generating…' : 'Generate source'}
-                      </button>
-                    </div>
-                  </label>
-                  {updatePackMessage ? (
-                    <div className="metadata-row" style={{ gridColumn: '1 / -1' }}>
-                      <Text variant="body-xs-normal" color="secondary">
-                        {updatePackMessage}
-                      </Text>
-                    </div>
-                  ) : null}
                 </div>
               </div>
             ) : null}
