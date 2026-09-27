@@ -14,8 +14,16 @@ policies:
 
   # Pack endpoints
   - object: '/packs'
-    actions: ['GET']
+    actions: ['GET', 'PUT', 'PATCH']
   - object: '/packs/*'
+    actions: ['GET', 'PUT', 'PATCH', 'DELETE']
+  - object: '/packs/*/export'
+    actions: ['GET']
+  - object: '/m/:gid/packs'
+    actions: ['GET', 'PUT', 'PATCH']
+  - object: '/m/:gid/packs/*'
+    actions: ['GET', 'PUT', 'PATCH', 'DELETE']
+  - object: '/m/:gid/packs/*/export'
     actions: ['GET']
 
   # Knowledge objects within packs

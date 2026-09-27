@@ -256,6 +256,34 @@ function resolvePackInheritanceStatus(pack: Pick<Pack, 'groupIds' | 'inheritedFr
   return 'local';
 }
 
+function normalizePackSource(source: unknown): Pack['source'] {
+  if (typeof source === 'string') {
+    const trimmed = source.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    return {
+      type: trimmed.startsWith('git+') ? 'git' : trimmed.endsWith('.crbl') ? 'url' : 'url',
+      location: trimmed,
+    };
+  }
+
+  if (isRecord(source)) {
+    const location = readString(source.location);
+    if (!location) {
+      return undefined;
+    }
+
+    return {
+      type: readString(source.type) ?? 'unknown',
+      location,
+    };
+  }
+
+  return undefined;
+}
+
 function mapPack(item: ApiRecord, groupId?: string): Pack {
   const id = readString(item.id) ?? readString(item.name) ?? 'unknown-pack';
   const inheritedFrom = readString(item.__srcGroup) ?? groupId;
@@ -276,12 +304,7 @@ function mapPack(item: ApiRecord, groupId?: string): Pack {
     inheritedModified,
     configDrift: false,
     status: undefined,
-    source: isRecord(item.source)
-      ? {
-          type: readString(item.source.type) ?? 'unknown',
-          location: readString(item.source.location),
-        }
-      : undefined,
+    source: normalizePackSource(item.source),
   };
 
   pack.status = resolvePackInheritanceStatus(pack);
@@ -779,6 +802,109 @@ export async function fetchPack(packId: string): Promise<Pack> {
   const item = await fetchRecord(`/packs/${encodePathSegment(packId)}`);
 
   return mapPack(item);
+}
+
+export async function exportPack(
+  packId: string,
+  mode: 'merge' | 'default_only' = 'merge',
+  filename?: string,
+  groupId?: string,
+): Promise<Blob> {
+  const exportEndpoints = [
+    groupId ? `${requireBaseUrl()}/m/${encodeURIComponent(groupId)}/packs/${encodePathSegment(packId)}/export?mode=${encodeURIComponent(mode)}&filename=${encodeURIComponent(filename ?? `${packId}.crbl`)}` : undefined,
+    `${requireBaseUrl()}/packs/${encodePathSegment(packId)}/export?mode=${encodeURIComponent(mode)}&filename=${encodeURIComponent(filename ?? `${packId}.crbl`)}`,
+  ].filter((endpoint): endpoint is string => Boolean(endpoint));
+
+  let lastError: { status: number; details: string } | undefined;
+
+  for (const endpoint of exportEndpoints) {
+    const response = await fetch(endpoint);
+
+    if (response.ok) {
+      return response.blob();
+    }
+
+    const raw = await response.text();
+    const details = raw ? raw : `HTTP ${response.status}`;
+    lastError = { status: response.status, details };
+
+    if (response.status !== 404) {
+      throw new ApiError(`Failed to export pack ${packId}: ${details}`, response.status, details);
+    }
+  }
+
+  if (lastError) {
+    throw new ApiError(`Failed to export pack ${packId}: ${lastError.details}`, lastError.status, lastError.details);
+  }
+
+  throw new ApiError(`Failed to export pack ${packId}: Not Found`, 404, 'Not Found');
+}
+
+export async function uploadPack(file: File | Blob, filename?: string): Promise<string> {
+  const payloadFile = file instanceof File ? file : new File([file], filename ?? 'pack.crbl', { type: 'application/octet-stream' });
+  const response = await fetch(`${requireBaseUrl()}/packs?filename=${encodeURIComponent(payloadFile.name)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+    },
+    body: payloadFile,
+  });
+
+  const body = await handleResponse<unknown>(response);
+  const source = isRecord(body) ? readString(body.source) : undefined;
+
+  if (!source) {
+    throw new ApiError(`Unexpected pack upload response for ${payloadFile.name}`, response.status, body);
+  }
+
+  return source;
+}
+
+export async function stagePackForUpgrade(packId: string, groupId?: string): Promise<string> {
+  const exported = await exportPack(packId, 'merge', `${packId}.crbl`, groupId);
+  return uploadPack(exported, `${packId}.crbl`);
+}
+
+export async function updatePack(
+  packId: string,
+  source: string,
+  options: Partial<{ minor: boolean; allowCustomFunctions: boolean; spec: string; groupId: string }> = {},
+): Promise<Pack> {
+  const endpoint = options.groupId
+    ? `${requireBaseUrl()}/m/${encodeURIComponent(options.groupId)}/packs/${encodePathSegment(packId)}`
+    : `${requireBaseUrl()}/packs/${encodePathSegment(packId)}`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        source,
+        minor: options.minor ?? true,
+        allowCustomFunctions: options.allowCustomFunctions ?? true,
+        ...(options.spec ? { spec: options.spec } : {}),
+      }),
+    });
+
+    const payload = await handleResponse<unknown>(response);
+    const item = getCollectionItems(payload)[0] ?? (isRecord(payload) ? payload : undefined);
+
+    if (!item) {
+      throw new ApiError(`Unexpected pack upgrade response for ${packId}`, response.status, payload);
+    }
+
+    return mapPack(item);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (/up to date|already up to date/i.test(message)) {
+      return fetchPack(packId);
+    }
+
+    throw error;
+  }
 }
 
 async function resolvePackId(packId: string): Promise<string> {

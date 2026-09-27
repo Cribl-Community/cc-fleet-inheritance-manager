@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Text } from '@capra/core';
+import { stagePackForUpgrade, updatePack } from '../api';
 import type { FleetProduct, KnowledgeObject, PackReference, PackRelationshipSummary, PackUsageLocation } from '../types';
 import { FleetProductBadge } from './FleetProductBadge';
 import {
@@ -77,6 +78,31 @@ function sortKnowledgeObjectsByName(
   return next;
 }
 
+export function isReusablePackSource(source: string): boolean {
+  const trimmed = source.trim();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  if (trimmed.startsWith('file:') || trimmed.startsWith('data:')) {
+    return false;
+  }
+
+  if (trimmed.startsWith('/') || trimmed.startsWith('\\') || /^[a-zA-Z]:[\\/]/.test(trimmed)) {
+    return false;
+  }
+
+  if (/\.(crbl|zip)$/i.test(trimmed)) {
+    return true;
+  }
+
+  return /^staged:/i.test(trimmed)
+    || /^git@/i.test(trimmed)
+    || /^git\+https?:\/\//i.test(trimmed)
+    || /^https?:\/\//i.test(trimmed);
+}
+
 export function PacksView() {
   const { data: packs, loading, error, retry } = usePackRelationshipSummaries();
   const [searchTerm, setSearchTerm] = useState('');
@@ -84,6 +110,17 @@ export function PacksView() {
   const [productFilter, setProductFilter] = useState<FleetProductFilter>('all');
   const [selectedPackId, setSelectedPackId] = useState<string | null>(null);
   const [selectedUsageContextKey, setSelectedUsageContextKey] = useState<string | null>(null);
+  const [updatingPackId, setUpdatingPackId] = useState<string | null>(null);
+  const [updatePackMessage, setUpdatePackMessage] = useState<string | null>(null);
+  const [isEditingPack, setIsEditingPack] = useState(false);
+  const [packSourceMode, setPackSourceMode] = useState<'current' | 'custom-url' | 'git-url' | 'source-id'>('current');
+  const [packDraft, setPackDraft] = useState<{
+    displayName: string;
+    description: string;
+    author: string;
+    tags: string;
+    source: string;
+  } | null>(null);
 
   const filteredPacks = useMemo(() => {
     if (!packs) {
@@ -209,9 +246,24 @@ export function PacksView() {
 
   useEffect(() => {
     if (!selectedPack) {
+      setPackDraft(null);
+      setIsEditingPack(false);
       setSelectedUsageContextKey(null);
       return;
     }
+
+    const currentSource = selectedPack.source?.location ?? '';
+    const isLocalTempSource = currentSource.startsWith('file:');
+
+    setPackDraft({
+      displayName: selectedPack.displayName ?? selectedPack.id,
+      description: selectedPack.description ?? '',
+      author: selectedPack.author ?? '',
+      tags: selectedPack.tags?.join(', ') ?? '',
+      source: isLocalTempSource ? '' : currentSource,
+    });
+    setPackSourceMode(isLocalTempSource ? 'custom-url' : currentSource ? 'current' : 'custom-url');
+    setIsEditingPack(false);
 
     if (visibleUsageLocations.length === 0) {
       setSelectedUsageContextKey(null);
@@ -228,6 +280,119 @@ export function PacksView() {
       setSelectedUsageContextKey(`${defaultUsageLocation.product}:${defaultUsageLocation.fleetId}`);
     }
   }, [selectedPack, selectedUsageContextKey, visibleUsageLocations]);
+
+  const resolvePackSource = useCallback(() => {
+    if (!packDraft) {
+      return '';
+    }
+
+    if (packSourceMode === 'current') {
+      return selectedPack?.source?.location?.trim() ?? '';
+    }
+
+    return packDraft.source.trim();
+  }, [packDraft, packSourceMode, selectedPack]);
+
+  const isReusablePackSource = useCallback((source: string): boolean => isReusablePackSource(source), []);
+
+  const handlePackDraftChange = useCallback(
+    (field: keyof NonNullable<typeof packDraft>, value: string) => {
+      setPackDraft((current) => (current ? { ...current, [field]: value } : current));
+    },
+    [],
+  );
+
+  const handleSourceModeChange = useCallback((nextMode: 'current' | 'custom-url' | 'git-url' | 'source-id') => {
+    setPackSourceMode(nextMode);
+
+    if (!selectedPack) {
+      return;
+    }
+
+    if (nextMode === 'current') {
+      setPackDraft((current) => ({
+        displayName: current?.displayName ?? selectedPack.displayName ?? selectedPack.id,
+        description: current?.description ?? selectedPack.description ?? '',
+        author: current?.author ?? selectedPack.author ?? '',
+        tags: current?.tags ?? selectedPack.tags?.join(', ') ?? '',
+        source: selectedPack.source?.location ?? '',
+      }));
+    }
+  }, [selectedPack]);
+
+  const handleAutoStageSource = useCallback(async () => {
+    if (!selectedPack) {
+      return;
+    }
+
+    setUpdatePackMessage(null);
+    setUpdatingPackId(selectedPack.id);
+
+    try {
+      const source = await stagePackForUpgrade(selectedPack.id, selectedPack.groupIds?.[0]);
+      setPackDraft((current) => (current ? { ...current, source } : current));
+      setPackSourceMode('source-id');
+      setUpdatePackMessage(`Generated a reusable source for ${selectedPack.displayName ?? selectedPack.id}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Pack source generation failed.';
+      setUpdatePackMessage(message);
+    } finally {
+      setUpdatingPackId(null);
+    }
+  }, [selectedPack]);
+
+  const handlePublishPack = useCallback(async () => {
+    if (!selectedPack || !packDraft) {
+      setUpdatePackMessage('No pack is selected, so publish cannot start.');
+      return;
+    }
+
+    const source = resolvePackSource();
+
+    if (!source) {
+      setUpdatePackMessage('Choose or enter a pack source before publishing.');
+      return;
+    }
+
+    if (!isReusablePackSource(source)) {
+      setUpdatePackMessage('This source is not reusable. Generate a source first, or enter a direct .crbl URL or Git URL before publishing.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Publish changes for "${selectedPack.displayName ?? selectedPack.id}" using this source:\n${source}\n\nThis replaces the installed pack contents and cannot be undone.`,
+    );
+
+    if (!confirmed) {
+      setUpdatePackMessage('Overwrite cancelled by user.');
+      return;
+    }
+
+    setUpdatingPackId(selectedPack.id);
+    setUpdatePackMessage('Sending pack overwrite request...');
+
+    try {
+      const updatedPack = await updatePack(selectedPack.id, source, {
+        minor: true,
+        allowCustomFunctions: true,
+        groupId: selectedPack.groupIds?.[0],
+      });
+
+      if (updatedPack.version && selectedPack.version && updatedPack.version === selectedPack.version) {
+        setUpdatePackMessage(`${selectedPack.displayName ?? selectedPack.id} is already up to date (version ${updatedPack.version}).`);
+      } else {
+        setUpdatePackMessage(`Published updates for ${selectedPack.displayName ?? selectedPack.id}.`);
+      }
+
+      setIsEditingPack(false);
+      retry();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Publish failed.';
+      setUpdatePackMessage(message);
+    } finally {
+      setUpdatingPackId(null);
+    }
+  }, [isReusablePackSource, packDraft, resolvePackSource, retry, selectedPack]);
 
   useEffect(() => {
     if (
@@ -668,6 +833,147 @@ export function PacksView() {
                 </div>
               ) : null}
             </div>
+
+            <div className="pill-row" style={{ marginTop: '1rem' }}>
+              <button
+                type="button"
+                className="pill"
+                onClick={() => setIsEditingPack((current) => !current)}
+              >
+                {isEditingPack ? 'Cancel edit' : 'Edit'}
+              </button>
+              <button
+                type="button"
+                className="pill"
+                onClick={handlePublishPack}
+                disabled={updatingPackId === selectedPack.id}
+              >
+                {updatingPackId === selectedPack.id ? 'Publishing…' : isEditingPack ? 'Publish overwrite' : 'Overwrite selected pack'}
+              </button>
+            </div>
+
+            {isEditingPack && packDraft ? (
+              <div className="detail-section" style={{ marginTop: '1rem' }}>
+                <Text as="h3" variant="heading-sm">
+                  Overwrite selected pack
+                </Text>
+                <div className="metadata-grid" style={{ marginTop: '0.75rem' }}>
+                  <label className="metadata-row">
+                    <Text variant="body-xs-semibold" color="secondary">
+                      Target pack
+                    </Text>
+                    <input
+                      className="search-input"
+                      value={selectedPack.displayName ?? selectedPack.id}
+                      readOnly
+                    />
+                  </label>
+                  <label className="metadata-row">
+                    <Text variant="body-xs-semibold" color="secondary">
+                      Current source
+                    </Text>
+                    <input
+                      className="search-input"
+                      value={selectedPack.source?.location ?? '—'}
+                      readOnly
+                    />
+                  </label>
+                  <label className="metadata-row">
+                    <Text variant="body-xs-semibold" color="secondary">
+                      Display name
+                    </Text>
+                    <input
+                      className="search-input"
+                      value={packDraft.displayName}
+                      onChange={(event) => handlePackDraftChange('displayName', event.target.value)}
+                    />
+                  </label>
+                  <label className="metadata-row">
+                    <Text variant="body-xs-semibold" color="secondary">
+                      Author
+                    </Text>
+                    <input
+                      className="search-input"
+                      value={packDraft.author}
+                      onChange={(event) => handlePackDraftChange('author', event.target.value)}
+                    />
+                  </label>
+                  <label className="metadata-row" style={{ gridColumn: '1 / -1' }}>
+                    <Text variant="body-xs-semibold" color="secondary">
+                      Description
+                    </Text>
+                    <textarea
+                      className="search-input"
+                      value={packDraft.description}
+                      onChange={(event) => handlePackDraftChange('description', event.target.value)}
+                      rows={4}
+                    />
+                  </label>
+                  <label className="metadata-row">
+                    <Text variant="body-xs-semibold" color="secondary">
+                      Tags
+                    </Text>
+                    <input
+                      className="search-input"
+                      value={packDraft.tags}
+                      onChange={(event) => handlePackDraftChange('tags', event.target.value)}
+                    />
+                  </label>
+                  <label className="metadata-row">
+                    <Text variant="body-xs-semibold" color="secondary">
+                      Source type
+                    </Text>
+                    <select
+                      className="search-input"
+                      value={packSourceMode}
+                      onChange={(event) => handleSourceModeChange(event.target.value as 'current' | 'custom-url' | 'git-url' | 'source-id')}
+                    >
+                      <option value="current">Current installed source</option>
+                      <option value="custom-url">Custom .crbl URL</option>
+                      <option value="git-url">Git repo URL</option>
+                      <option value="source-id">Staged source ID</option>
+                    </select>
+                  </label>
+                  <label className="metadata-row" style={{ gridColumn: '1 / -1' }}>
+                    <Text variant="body-xs-semibold" color="secondary">
+                      Overwrite source
+                    </Text>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', width: '100%' }}>
+                      <input
+                        className="search-input"
+                        value={packDraft.source}
+                        onChange={(event) => handlePackDraftChange('source', event.target.value)}
+                        placeholder={
+                          packSourceMode === 'current'
+                            ? 'Current installed source'
+                            : packSourceMode === 'custom-url'
+                              ? 'https://example.com/pack.crbl'
+                              : packSourceMode === 'git-url'
+                                ? 'git+https://github.com/org/repo.git'
+                                : 'staged-source-id'
+                        }
+                        style={{ flex: 1 }}
+                      />
+                      <button
+                        type="button"
+                        className="pill"
+                        onClick={handleAutoStageSource}
+                        disabled={updatingPackId === selectedPack.id}
+                      >
+                        {updatingPackId === selectedPack.id ? 'Generating…' : 'Generate source'}
+                      </button>
+                    </div>
+                  </label>
+                  {updatePackMessage ? (
+                    <div className="metadata-row" style={{ gridColumn: '1 / -1' }}>
+                      <Text variant="body-xs-normal" color="secondary">
+                        {updatePackMessage}
+                      </Text>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
 
             <div className="detail-section">
               <Text as="h3" variant="heading-sm">
