@@ -657,6 +657,66 @@ body {
   color: var(--ds-text-danger);
 }
 
+.pack-action-banner {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin-bottom: 1rem;
+  padding: 0.875rem 1rem;
+  border: 1px solid var(--ds-border-neutral);
+  border-radius: 0.75rem;
+  background: var(--ds-background);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+}
+
+.pack-action-banner-pending {
+  border-color: var(--ds-accent);
+}
+
+.pack-action-banner-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.pack-action-banner-summary {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.pack-action-banner-status {
+  margin-top: 0;
+}
+
+.pack-action-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.pack-action-banner-message {
+  margin-top: 0.5rem;
+}
+
+.pack-action-banner-files {
+  max-height: 10rem;
+  overflow-y: auto;
+}
+
+.commit-message-field {
+  margin-top: 0.75rem;
+}
+
+.pack-leave-reasons {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0 0;
+  padding-left: 1.25rem;
+}
+
 .preview-card {
   margin-top: 1rem;
   padding: 1rem;

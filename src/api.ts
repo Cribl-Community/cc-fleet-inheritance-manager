@@ -18,6 +18,7 @@ import type {
   RouteContentPreview,
 } from './types';
 import { readPackArchiveVersion, rewritePackArchive, type PackMetadataEdits } from './packArchive.ts';
+import { applyLookupRowPatches, type LookupRowPatch } from './lookupCsv.ts';
 
 type ApiRecord = Record<string, unknown>;
 const FLEET_PRODUCTS: FleetProduct[] = ['stream', 'edge'];
@@ -1469,27 +1470,86 @@ export async function updatePackRoute(
   await patchJson(packScopedUrl(packId, `/routes/${encodePathSegment(tableId)}`, groupId), { ...table, id: tableId, routes });
 }
 
-export type LookupRowPatch =
-  | {
-      op: 'add' | 'replace';
-      /** One-based row number, as reported in the lookup content's `__id` column. Ignored for placement by `add`. */
-      rowId: number;
-      /** Cell values in column order, without the `__id` column. */
-      value: string[];
-    }
-  | {
-      op: 'remove';
-      rowId: number;
-    };
+export type { LookupRowPatch };
 
-/** Apply row-level add, replace, and remove operations to a CSV lookup inside a pack. */
+/** How a lookup edit was written: row-level patch, or a full-file rewrite when Cribl rejected the patch. */
+export type LookupSaveMethod = 'row-patch' | 'full-file';
+
+/**
+ * Apply row-level add, replace, and remove operations to a CSV lookup inside a pack.
+ * If Cribl rejects the row-level patch as invalid (400), the same operations are applied to the full
+ * CSV and the lookup is updated with the rewritten content.
+ */
 export async function updatePackLookupRows(
   packId: string,
   lookupId: string,
   patches: LookupRowPatch[],
   groupId?: string,
-): Promise<void> {
-  await patchJson(packScopedUrl(packId, `/system/lookups/${encodePathSegment(lookupId)}/content`, groupId), patches);
+): Promise<LookupSaveMethod> {
+  const lookupUrl = packScopedUrl(packId, `/system/lookups/${encodePathSegment(lookupId)}`, groupId);
+
+  try {
+    await patchJson(`${lookupUrl}/content`, patches);
+    return 'row-patch';
+  } catch (patchError) {
+    if (!(patchError instanceof ApiError) || patchError.status !== 400) {
+      throw patchError;
+    }
+
+    try {
+      await rewritePackLookupFile(lookupUrl, lookupId, patches);
+      return 'full-file';
+    } catch (rewriteError) {
+      throw new ApiError(
+        `Cribl rejected the row edit (${describeApiError(patchError)}), and rewriting the whole file also failed: ${describeApiError(rewriteError)}`,
+        rewriteError instanceof ApiError ? rewriteError.status : 400,
+        { rowPatch: patchError.details, fullFile: rewriteError instanceof ApiError ? rewriteError.details : undefined },
+      );
+    }
+  }
+}
+
+async function rewritePackLookupFile(lookupUrl: string, lookupId: string, patches: LookupRowPatch[]): Promise<void> {
+  if (!/\.csv$/i.test(lookupId)) {
+    throw new ApiError(`Only plain .csv lookups can be rewritten from this app; ${lookupId} is not one.`, 400);
+  }
+
+  const lookup = getCollectionItems(await handleResponse<unknown>(await fetch(lookupUrl)))[0];
+
+  if (!lookup) {
+    throw new ApiError(`Lookup ${lookupId} was not found.`, 404);
+  }
+
+  const rawResponse = await fetch(`${lookupUrl}/content?raw=true`);
+
+  if (!rawResponse.ok) {
+    await handleResponse<unknown>(rawResponse);
+  }
+
+  const content = applyLookupRowPatches(await rawResponse.text(), patches);
+  // Complete representation required; read-only fields (size, modified, version, pendingTask) are left out.
+  const body: ApiRecord = { id: lookupId, content };
+  for (const key of ['description', 'tags', 'mode'] as const) {
+    if (lookup[key] !== undefined) {
+      body[key] = lookup[key];
+    }
+  }
+
+  await patchJson(lookupUrl, body);
+}
+
+/** Error message plus any validation details Cribl returned. */
+export function describeApiError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const details = error instanceof ApiError ? error.details : undefined;
+  const detailText = details === undefined ? '' : JSON.stringify(details);
+
+  return detailText && detailText !== JSON.stringify(error.message) && detailText !== '{}'
+    ? `${error.message} ${detailText.slice(0, 500)}`
+    : error.message;
 }
 
 export async function fetchFleetPacks(groupId: string, product: FleetProduct = 'stream'): Promise<Pack[]> {

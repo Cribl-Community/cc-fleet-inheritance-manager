@@ -1,6 +1,7 @@
 import { Alert, Text } from '@capra/core';
 import { BoxArchive, BranchesOutlined, FleetOutlined } from '@capra/icons';
-import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
+import { useState } from 'react';
+import { NavLink, Route, RouterProvider, Routes, createBrowserRouter } from 'react-router-dom';
 import { hasCriblApiUrl } from './api';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { FleetsView } from './components/FleetsView';
@@ -12,6 +13,7 @@ function NavigationTabs() {
   const tabs = [
     { path: '/', label: 'Fleets', Icon: FleetOutlined },
     { path: '/packs', label: 'Packs', Icon: BoxArchive },
+    { path: '/packs-preview', label: 'Packs (preview)', Icon: BoxArchive },
     { path: '/inheritance', label: 'Inheritance', Icon: BranchesOutlined },
   ];
 
@@ -70,6 +72,7 @@ function AppContent() {
           <Routes>
             <Route path="/" element={<FleetsView />} />
             <Route path="/packs" element={<PacksView />} />
+            <Route path="/packs-preview" element={<PacksView layout="action-bar" />} />
             <Route path="/inheritance" element={<InheritanceView />} />
           </Routes>
         </ErrorBoundary>
@@ -79,11 +82,10 @@ function AppContent() {
 }
 
 export default function App() {
-  const basePath = window.CRIBL_BASE_PATH ?? '/';
-
-  return (
-    <BrowserRouter basename={basePath}>
-      <AppContent />
-    </BrowserRouter>
+  // A data router is required for useBlocker (leave-page confirmation in the preview Packs tab).
+  const [router] = useState(() =>
+    createBrowserRouter([{ path: '*', element: <AppContent /> }], { basename: window.CRIBL_BASE_PATH ?? '/' }),
   );
+
+  return <RouterProvider router={router} />;
 }

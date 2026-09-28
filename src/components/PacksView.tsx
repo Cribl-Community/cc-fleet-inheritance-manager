@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Text } from '@capra/core';
+import { Button, Modal, Text } from '@capra/core';
+import { useBlocker, type BlockerFunction } from 'react-router-dom';
 import {
   PackExportAssemblyError,
   commitConfigChanges,
+  describeApiError,
   deployGroup,
   exportPackForEditing,
   fetchGroupPack,
@@ -268,7 +270,14 @@ function sortKnowledgeObjectsByName(
   return next;
 }
 
-export function PacksView() {
+/**
+ * `classic` keeps edit/publish/deploy controls inline in the details panel.
+ * `action-bar` (preview) moves them into a sticky banner and confirms before leaving with pending changes.
+ */
+export type PacksViewLayout = 'classic' | 'action-bar';
+
+export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } = {}) {
+  const isActionBarLayout = layout === 'action-bar';
   const { data: packs, loading, error, retry } = usePackRelationshipSummaries();
   const [searchTerm, setSearchTerm] = useState('');
   const [viewMode, setViewMode] = useState<PackViewMode>('catalog');
@@ -285,10 +294,14 @@ export function PacksView() {
   const [deployPlan, setDeployPlan] = useState<{ packId: string; targets: PackDeployTarget[] } | null>(null);
   const [pendingChanges, setPendingChanges] = useState<PendingPackChanges | null>(null);
   const [isConfirmingDeploy, setIsConfirmingDeploy] = useState(false);
+  const [commitMessage, setCommitMessage] = useState('');
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployMessage, setDeployMessage] = useState<{ packId: string; text: string } | null>(null);
   const [deployResults, setDeployResults] = useState<{ packId: string; items: PackPublishResult[] } | null>(null);
   const [packDraft, setPackDraft] = useState<PackDraft | null>(null);
+  const [isEditingKnowledgeObject, setIsEditingKnowledgeObject] = useState(false);
+  const [savedUncommittedPackIds, setSavedUncommittedPackIds] = useState<string[]>([]);
+  const [pendingPackSwitchId, setPendingPackSwitchId] = useState<string | null>(null);
 
   const filteredPacks = useMemo(() => {
     if (!packs) {
@@ -730,11 +743,12 @@ export function PacksView() {
         }
 
         setPendingChanges(pending);
+        setCommitMessage(`Update pack ${packId} (Fleet Inheritance Manager)`);
         setIsConfirmingDeploy(true);
         report(
           `This will commit the ${pending.packFiles.length} file${pending.packFiles.length === 1 ? '' : 's'} listed below for "${packLabel}" and deploy that commit to: ${fleetLabels}. ` +
             `${pending.otherFiles.length > 0 ? `${pending.otherFiles.length} other uncommitted file${pending.otherFiles.length === 1 ? ' is' : 's are'} in these fleets and will be left out of the commit. ` : ''}` +
-            'Deploying also rolls out anything else already committed for these fleets. This cannot be undone. Click Confirm commit & deploy to continue.',
+            'Deploying also rolls out anything else already committed for these fleets. This cannot be undone. Review the commit message, then click Confirm commit & deploy to continue.',
         );
       } catch (error) {
         report(`Could not read uncommitted changes: ${error instanceof Error ? error.message : String(error)}`);
@@ -745,13 +759,20 @@ export function PacksView() {
       return;
     }
 
+    const message = commitMessage.trim();
+
+    if (!message) {
+      report('Enter a commit message before confirming.');
+      return;
+    }
+
     setIsConfirmingDeploy(false);
     setIsDeploying(true);
 
     let commit: string;
     try {
       report(`Committing ${pendingChanges.packFiles.length} file${pendingChanges.packFiles.length === 1 ? '' : 's'}…`);
-      commit = await commitConfigChanges(`Update pack ${packId} (Fleet Inheritance Manager)`, pendingChanges.packFiles);
+      commit = await commitConfigChanges(message, pendingChanges.packFiles);
     } catch (error) {
       report(`Commit failed, so nothing was deployed: ${error instanceof Error ? error.message : String(error)}`);
       setPendingChanges(null);
@@ -825,10 +846,117 @@ export function PacksView() {
 
     if (failedCount === 0) {
       setDeployPlan(null);
+      setSavedUncommittedPackIds((current) => current.filter((id) => id !== packId));
     }
 
     retry();
-  }, [deployTargets, isConfirmingDeploy, pendingChanges, retry, selectedPack]);
+  }, [commitMessage, deployTargets, isConfirmingDeploy, pendingChanges, retry, selectedPack]);
+
+  const handleToggleEdit = useCallback(() => {
+    if (!selectedPack) {
+      return;
+    }
+
+    if (isEditingPack) {
+      setPackDraft(buildPackDraft(selectedPack));
+      setUpdatePackMessage(null);
+      setOriginalConfigGroupIds([]);
+      setPublishGroupIds([]);
+    } else {
+      const defaultTarget = publishTargets.find((target) => target.groupId === selectedPackGroupId) ?? publishTargets[0];
+      setPublishGroupIds(defaultTarget ? [defaultTarget.groupId] : []);
+      setPublishResults(null);
+    }
+    setIsEditingPack((current) => !current);
+    setIsConfirmingOverwrite(false);
+  }, [isEditingPack, publishTargets, selectedPack, selectedPackGroupId]);
+
+  const handleCancelDeploy = useCallback(() => {
+    if (!selectedPack) {
+      return;
+    }
+
+    setIsConfirmingDeploy(false);
+    setPendingChanges(null);
+    setDeployMessage({ packId: selectedPack.id, text: 'Commit & deploy cancelled. Nothing was changed.' });
+  }, [selectedPack]);
+
+  const handleKnowledgeObjectSaved = useCallback(() => {
+    if (selectedPack) {
+      const packId = selectedPack.id;
+      setSavedUncommittedPackIds((current) => (current.includes(packId) ? current : [...current, packId]));
+    }
+  }, [selectedPack]);
+
+  // Pending-change tracking for the action-bar layout's leave-page confirmation.
+  const changedFieldCount = Object.keys(packEdits).length;
+  const isBusy = updatingPackId !== null || isDeploying;
+  const hasUnsavedDraft = (isEditingPack && changedFieldCount > 0) || isEditingKnowledgeObject;
+  const unsavedDraftReasons = [
+    ...(isEditingPack && changedFieldCount > 0
+      ? [`${changedFieldCount} unsaved pack metadata change${changedFieldCount === 1 ? '' : 's'}`]
+      : []),
+    ...(isEditingKnowledgeObject ? ['A knowledge object edit that has not been saved'] : []),
+  ];
+  const pendingReasons = [
+    ...unsavedDraftReasons,
+    ...(deployPlan ? [`Published changes to "${deployPlan.packId}" that are not committed and deployed yet`] : []),
+    ...savedUncommittedPackIds.map((id) => `Saved knowledge object edits in "${id}" that are not committed and deployed yet`),
+    ...(isBusy ? ['A publish or deploy operation that is still running'] : []),
+  ];
+  const shouldGuardNavigation = isActionBarLayout && pendingReasons.length > 0;
+
+  const blocker = useBlocker(
+    useCallback<BlockerFunction>(
+      ({ currentLocation, nextLocation }) => shouldGuardNavigation && currentLocation.pathname !== nextLocation.pathname,
+      [shouldGuardNavigation],
+    ),
+  );
+
+  useEffect(() => {
+    if (!shouldGuardNavigation) {
+      return;
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [shouldGuardNavigation]);
+
+  const requestPackSelection = useCallback(
+    (packId: string) => {
+      if (isActionBarLayout && packId !== selectedPackId && hasUnsavedDraft) {
+        setPendingPackSwitchId(packId);
+        return;
+      }
+
+      setSelectedPackId(packId);
+    },
+    [hasUnsavedDraft, isActionBarLayout, selectedPackId],
+  );
+
+  const isLeaveModalOpen = blocker.state === 'blocked' || pendingPackSwitchId !== null;
+
+  const confirmLeave = () => {
+    if (blocker.state === 'blocked') {
+      blocker.proceed();
+    }
+    if (pendingPackSwitchId) {
+      setSelectedPackId(pendingPackSwitchId);
+      setPendingPackSwitchId(null);
+    }
+  };
+
+  const cancelLeave = () => {
+    if (blocker.state === 'blocked') {
+      blocker.reset();
+    }
+    setPendingPackSwitchId(null);
+  };
 
   useEffect(() => {
     if (
@@ -860,7 +988,274 @@ export function PacksView() {
     );
   }
 
+  const isPackBusy = selectedPack ? updatingPackId === selectedPack.id : false;
+
+  const editForm = selectedPack && isEditingPack && packDraft ? (
+    <div className="detail-section" style={{ marginTop: '1rem' }}>
+      <Text as="h3" variant="heading-sm">
+        Edit pack metadata
+      </Text>
+      <div className="metadata-grid" style={{ marginTop: '0.75rem' }}>
+        <fieldset className="publish-targets" disabled={isPackBusy}>
+          <legend>
+            <Text variant="body-xs-semibold" color="secondary">
+              Fleets to update ({publishGroupIds.length} of {publishTargets.length} selected)
+            </Text>
+          </legend>
+          <div className="pill-row" style={{ marginTop: 0 }}>
+            <button
+              type="button"
+              className="pill pill-subtle"
+              onClick={() => setPublishTargetSelection(publishTargets.map((target) => target.groupId))}
+            >
+              Select all
+            </button>
+            <button type="button" className="pill pill-subtle" onClick={() => setPublishTargetSelection([])}>
+              Clear
+            </button>
+          </div>
+          {publishTargets.length === 0 ? (
+            <Text variant="body-xs-normal" color="secondary">
+              No fleets with this pack installed were found.
+            </Text>
+          ) : (
+            publishTargets.map((target) => {
+              const isChecked = publishGroupIds.includes(target.groupId);
+              const usesOriginalConfig = originalConfigGroupIds.includes(target.groupId);
+
+              return (
+                <label key={target.groupId} className="publish-target">
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={() =>
+                      setPublishTargetSelection(
+                        isChecked
+                          ? publishGroupIds.filter((groupId) => groupId !== target.groupId)
+                          : [...publishGroupIds, target.groupId],
+                      )
+                    }
+                  />
+                  <span className="publish-target-body">
+                    <span className="list-card-header">
+                      <Text variant="body-sm-semibold">{target.label}</Text>
+                      {target.product ? <FleetProductBadge product={target.product} /> : null}
+                    </span>
+                    <Text variant="body-xs-normal" color="secondary">
+                      {`${target.version ?? 'Unknown version'} → ${target.parentGroupId ? `${plannedVersion} (via ${target.parentLabel})` : plannedVersion}`}
+                      {target.inheritingFleets.length > 0
+                        ? ` · Also inherited by: ${target.inheritingFleets.map((child) => child.label).join(', ')}`
+                        : ''}
+                      {target.parentLabel ? ` · Inherits from ${target.parentLabel}` : ''}
+                      {usesOriginalConfig ? ' · Will publish from original configuration (local modifications discarded)' : ''}
+                    </Text>
+                  </span>
+                </label>
+              );
+            })
+          )}
+        </fieldset>
+        <label className="metadata-row">
+          <Text variant="body-xs-semibold" color="secondary">
+            Current version
+          </Text>
+          <input
+            className="search-input"
+            value={selectedPack.version ?? '—'}
+            readOnly
+          />
+        </label>
+        <label className="metadata-row">
+          <Text variant="body-xs-semibold" color="secondary">
+            Display name
+          </Text>
+          <input
+            className="search-input"
+            value={packDraft.displayName}
+            onChange={(event) => handlePackDraftChange('displayName', event.target.value)}
+          />
+        </label>
+        <label className="metadata-row">
+          <Text variant="body-xs-semibold" color="secondary">
+            Author
+          </Text>
+          <input
+            className="search-input"
+            value={packDraft.author}
+            onChange={(event) => handlePackDraftChange('author', event.target.value)}
+          />
+        </label>
+        <label className="metadata-row" style={{ gridColumn: '1 / -1' }}>
+          <Text variant="body-xs-semibold" color="secondary">
+            Description
+          </Text>
+          <textarea
+            className="search-input"
+            value={packDraft.description}
+            onChange={(event) => handlePackDraftChange('description', event.target.value)}
+            rows={4}
+          />
+        </label>
+        <label className="metadata-row">
+          <Text variant="body-xs-semibold" color="secondary">
+            Tags (comma-separated)
+          </Text>
+          <input
+            className="search-input"
+            value={packDraft.tags}
+            onChange={(event) => handlePackDraftChange('tags', event.target.value)}
+          />
+        </label>
+      </div>
+    </div>
+  ) : null;
+
+  const commitMessageField =
+    isConfirmingDeploy && pendingChanges ? (
+      <label className="metadata-row commit-message-field">
+        <Text variant="body-xs-semibold" color="secondary">
+          Commit message
+        </Text>
+        <textarea
+          className="search-input"
+          value={commitMessage}
+          onChange={(event) => setCommitMessage(event.target.value)}
+          rows={2}
+          required
+          aria-invalid={commitMessage.trim() === ''}
+        />
+      </label>
+    ) : null;
+
+  const bannerStatus: Array<{ label: string; tone: 'alert' | 'info' | 'subtle' }> = selectedPack
+    ? [
+        ...(isEditingPack
+          ? [
+              changedFieldCount > 0
+                ? { label: `${changedFieldCount} unsaved change${changedFieldCount === 1 ? '' : 's'}`, tone: 'alert' as const }
+                : { label: 'Editing — no changes yet', tone: 'subtle' as const },
+            ]
+          : []),
+        ...(isEditingKnowledgeObject ? [{ label: 'Knowledge object edit in progress', tone: 'alert' as const }] : []),
+        ...(deployPlan?.packId === selectedPack.id ? [{ label: 'Published — not deployed', tone: 'info' as const }] : []),
+        ...(savedUncommittedPackIds.includes(selectedPack.id) ? [{ label: 'Saved — not committed', tone: 'info' as const }] : []),
+        ...(deployPlan && deployPlan.packId !== selectedPack.id
+          ? [{ label: `Undeployed changes in ${deployPlan.packId}`, tone: 'info' as const }]
+          : []),
+      ]
+    : [];
+
+  const actionBanner = selectedPack ? (
+    <div
+      className={`pack-action-banner${bannerStatus.some((status) => status.tone !== 'subtle') ? ' pack-action-banner-pending' : ''}`}
+      role="region"
+      aria-label="Pack actions"
+    >
+      <div className="pack-action-banner-row">
+        <div className="pack-action-banner-summary">
+          <Text variant="body-md-semibold">{selectedPack.displayName || selectedPack.id}</Text>
+          <div className="pill-row pack-action-banner-status">
+            {bannerStatus.length > 0 ? (
+              bannerStatus.map((status) => (
+                <span
+                  key={status.label}
+                  className={`pill${status.tone === 'alert' ? ' pack-version-pill' : status.tone === 'subtle' ? ' pill-subtle' : ''}`}
+                >
+                  {status.label}
+                </span>
+              ))
+            ) : (
+              <span className="pill pill-subtle">No pending changes</span>
+            )}
+          </div>
+          <Text variant="body-xs-normal" color="secondary">
+            Commit &amp; deploy targets: {deployTargets.map((target) => target.label).join(', ') || 'no fleets'}
+          </Text>
+        </div>
+        <div className="pack-action-banner-actions">
+          {isEditingPack ? (
+            <>
+              <Button variant="primary" onClick={handlePublishPack} pending={isPackBusy} disabled={isPackBusy || isDeploying}>
+                {isConfirmingOverwrite ? 'Confirm overwrite' : 'Publish'}
+              </Button>
+              <Button variant="tertiary" onClick={handleToggleEdit} disabled={isPackBusy}>
+                Cancel edit
+              </Button>
+            </>
+          ) : (
+            <Button variant="secondary" onClick={handleToggleEdit} disabled={isPackBusy || isDeploying}>
+              Edit
+            </Button>
+          )}
+          <Button
+            variant={isConfirmingDeploy || deployPlan?.packId === selectedPack.id ? 'primary' : 'secondary'}
+            onClick={handleCommitAndDeploy}
+            pending={isDeploying}
+            disabled={
+              isDeploying || isPackBusy || deployTargets.length === 0 || (isConfirmingDeploy && commitMessage.trim() === '')
+            }
+          >
+            {isConfirmingDeploy ? 'Confirm commit & deploy' : 'Commit & deploy'}
+          </Button>
+          {isConfirmingDeploy ? (
+            <Button variant="tertiary" onClick={handleCancelDeploy}>
+              Cancel deploy
+            </Button>
+          ) : null}
+        </div>
+      </div>
+      {updatePackMessage ? (
+        <div className="pack-action-banner-message" role="status" aria-live="polite">
+          <Text variant="body-xs-normal" color="secondary">
+            {updatePackMessage}
+          </Text>
+        </div>
+      ) : null}
+      {deployMessage?.packId === selectedPack.id ? (
+        <div className="pack-action-banner-message" role="status" aria-live="polite">
+          <Text variant="body-xs-normal" color="secondary">
+            {deployMessage.text}
+          </Text>
+        </div>
+      ) : null}
+      {commitMessageField}
+      {isConfirmingDeploy && pendingChanges ? (
+        <ul className="publish-results pack-action-banner-files" aria-label="Files to commit">
+          {pendingChanges.packFiles.map((file) => (
+            <li key={file} className="publish-result">
+              <Text variant="body-xs-normal">{file}</Text>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  ) : null;
+
   return (
+    <>
+    {isActionBarLayout ? (
+      <Modal
+        isOpen={isLeaveModalOpen}
+        title={pendingPackSwitchId ? 'Switch packs and discard edits?' : 'Leave with pending changes?'}
+        confirmButtonText={pendingPackSwitchId ? 'Discard and switch' : 'Leave page'}
+        cancelButtonText="Stay"
+        onConfirm={confirmLeave}
+        onClose={cancelLeave}
+      >
+        <Text as="p" variant="body-sm-normal">
+          {pendingPackSwitchId
+            ? 'Switching packs discards these unsaved edits. This cannot be undone:'
+            : 'You have pending changes on this page. Unsaved edits are discarded if you leave, and published or saved changes stay uncommitted until someone runs Commit & deploy:'}
+        </Text>
+        <ul className="pack-leave-reasons">
+          {(pendingPackSwitchId ? unsavedDraftReasons : pendingReasons).map((reason) => (
+            <li key={reason}>
+              <Text variant="body-sm-normal">{reason}</Text>
+            </li>
+          ))}
+        </ul>
+      </Modal>
+    ) : null}
     <section className="split-layout">
       <div className="panel">
         <div className="section-header">
@@ -988,7 +1383,7 @@ export function PacksView() {
                   key={pack.id}
                   type="button"
                   className={`list-card${selectedPack?.id === pack.id ? ' list-card-selected' : ''}`}
-                  onClick={() => setSelectedPackId(pack.id)}
+                  onClick={() => requestPackSelection(pack.id)}
                 >
                   <div className="list-card-header">
                     <Text variant="body-md-semibold">{pack.displayName || pack.id}</Text>
@@ -1032,7 +1427,7 @@ export function PacksView() {
           <PackRelationshipSankeyChart
             layout={sankeyLayout}
             selectedPackId={selectedPack?.id ?? null}
-            onSelectPack={setSelectedPackId}
+            onSelectPack={requestPackSelection}
           />
         )}
       </div>
@@ -1050,6 +1445,19 @@ export function PacksView() {
                 </Text>
               </div>
             </div>
+
+            {isActionBarLayout ? (
+              <>
+                {actionBanner}
+                {publishResults?.packId === selectedPack.id && publishResults.items.length > 0 ? (
+                  <PublishResultList items={publishResults.items} label="Publish results by fleet" successLabel="Published" />
+                ) : null}
+                {deployResults?.packId === selectedPack.id && deployResults.items.length > 0 ? (
+                  <PublishResultList items={deployResults.items} label="Deploy results by fleet" successLabel="Deployed" />
+                ) : null}
+                {editForm}
+              </>
+            ) : null}
 
             <div className="detail-section">
               <Text as="h3" variant="heading-sm">
@@ -1270,24 +1678,13 @@ export function PacksView() {
               ) : null}
             </div>
 
+            {!isActionBarLayout ? (
+            <>
             <div className="pill-row" style={{ marginTop: '1rem' }}>
               <button
                 type="button"
                 className="pill"
-                onClick={() => {
-                  if (isEditingPack) {
-                    setPackDraft(buildPackDraft(selectedPack));
-                    setUpdatePackMessage(null);
-                    setOriginalConfigGroupIds([]);
-                    setPublishGroupIds([]);
-                  } else {
-                    const defaultTarget = publishTargets.find((target) => target.groupId === selectedPackGroupId) ?? publishTargets[0];
-                    setPublishGroupIds(defaultTarget ? [defaultTarget.groupId] : []);
-                    setPublishResults(null);
-                  }
-                  setIsEditingPack((current) => !current);
-                  setIsConfirmingOverwrite(false);
-                }}
+                onClick={handleToggleEdit}
                 disabled={updatingPackId === selectedPack.id}
               >
                 {isEditingPack ? 'Cancel edit' : 'Edit'}
@@ -1335,7 +1732,12 @@ export function PacksView() {
                   type="button"
                   className="pill"
                   onClick={handleCommitAndDeploy}
-                  disabled={isDeploying || updatingPackId === selectedPack.id || deployTargets.length === 0}
+                  disabled={
+                    isDeploying ||
+                    updatingPackId === selectedPack.id ||
+                    deployTargets.length === 0 ||
+                    (isConfirmingDeploy && commitMessage.trim() === '')
+                  }
                 >
                   {isDeploying ? 'Working…' : isConfirmingDeploy ? 'Confirm commit & deploy' : 'Commit & deploy'}
                 </button>
@@ -1343,11 +1745,7 @@ export function PacksView() {
                   <button
                     type="button"
                     className="pill pill-subtle"
-                    onClick={() => {
-                      setIsConfirmingDeploy(false);
-                      setPendingChanges(null);
-                      setDeployMessage({ packId: selectedPack.id, text: 'Commit & deploy cancelled. Nothing was changed.' });
-                    }}
+                    onClick={handleCancelDeploy}
                   >
                     Cancel
                   </button>
@@ -1360,6 +1758,7 @@ export function PacksView() {
                   </Text>
                 </div>
               ) : null}
+              {commitMessageField}
               {isConfirmingDeploy && pendingChanges ? (
                 <ul className="publish-results" aria-label="Files to commit">
                   {pendingChanges.packFiles.map((file) => (
@@ -1374,124 +1773,8 @@ export function PacksView() {
               ) : null}
             </div>
 
-            {isEditingPack && packDraft ? (
-              <div className="detail-section" style={{ marginTop: '1rem' }}>
-                <Text as="h3" variant="heading-sm">
-                  Edit pack metadata
-                </Text>
-                <div className="metadata-grid" style={{ marginTop: '0.75rem' }}>
-                  <fieldset className="publish-targets" disabled={updatingPackId === selectedPack.id}>
-                    <legend>
-                      <Text variant="body-xs-semibold" color="secondary">
-                        Fleets to update ({publishGroupIds.length} of {publishTargets.length} selected)
-                      </Text>
-                    </legend>
-                    <div className="pill-row" style={{ marginTop: 0 }}>
-                      <button
-                        type="button"
-                        className="pill pill-subtle"
-                        onClick={() => setPublishTargetSelection(publishTargets.map((target) => target.groupId))}
-                      >
-                        Select all
-                      </button>
-                      <button type="button" className="pill pill-subtle" onClick={() => setPublishTargetSelection([])}>
-                        Clear
-                      </button>
-                    </div>
-                    {publishTargets.length === 0 ? (
-                      <Text variant="body-xs-normal" color="secondary">
-                        No fleets with this pack installed were found.
-                      </Text>
-                    ) : (
-                      publishTargets.map((target) => {
-                        const isChecked = publishGroupIds.includes(target.groupId);
-                        const usesOriginalConfig = originalConfigGroupIds.includes(target.groupId);
-
-                        return (
-                          <label key={target.groupId} className="publish-target">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() =>
-                                setPublishTargetSelection(
-                                  isChecked
-                                    ? publishGroupIds.filter((groupId) => groupId !== target.groupId)
-                                    : [...publishGroupIds, target.groupId],
-                                )
-                              }
-                            />
-                            <span className="publish-target-body">
-                              <span className="list-card-header">
-                                <Text variant="body-sm-semibold">{target.label}</Text>
-                                {target.product ? <FleetProductBadge product={target.product} /> : null}
-                              </span>
-                              <Text variant="body-xs-normal" color="secondary">
-                                {`${target.version ?? 'Unknown version'} → ${target.parentGroupId ? `${plannedVersion} (via ${target.parentLabel})` : plannedVersion}`}
-                                {target.inheritingFleets.length > 0
-                                  ? ` · Also inherited by: ${target.inheritingFleets.map((child) => child.label).join(', ')}`
-                                  : ''}
-                                {target.parentLabel ? ` · Inherits from ${target.parentLabel}` : ''}
-                                {usesOriginalConfig ? ' · Will publish from original configuration (local modifications discarded)' : ''}
-                              </Text>
-                            </span>
-                          </label>
-                        );
-                      })
-                    )}
-                  </fieldset>
-                  <label className="metadata-row">
-                    <Text variant="body-xs-semibold" color="secondary">
-                      Current version
-                    </Text>
-                    <input
-                      className="search-input"
-                      value={selectedPack.version ?? '—'}
-                      readOnly
-                    />
-                  </label>
-                  <label className="metadata-row">
-                    <Text variant="body-xs-semibold" color="secondary">
-                      Display name
-                    </Text>
-                    <input
-                      className="search-input"
-                      value={packDraft.displayName}
-                      onChange={(event) => handlePackDraftChange('displayName', event.target.value)}
-                    />
-                  </label>
-                  <label className="metadata-row">
-                    <Text variant="body-xs-semibold" color="secondary">
-                      Author
-                    </Text>
-                    <input
-                      className="search-input"
-                      value={packDraft.author}
-                      onChange={(event) => handlePackDraftChange('author', event.target.value)}
-                    />
-                  </label>
-                  <label className="metadata-row" style={{ gridColumn: '1 / -1' }}>
-                    <Text variant="body-xs-semibold" color="secondary">
-                      Description
-                    </Text>
-                    <textarea
-                      className="search-input"
-                      value={packDraft.description}
-                      onChange={(event) => handlePackDraftChange('description', event.target.value)}
-                      rows={4}
-                    />
-                  </label>
-                  <label className="metadata-row">
-                    <Text variant="body-xs-semibold" color="secondary">
-                      Tags (comma-separated)
-                    </Text>
-                    <input
-                      className="search-input"
-                      value={packDraft.tags}
-                      onChange={(event) => handlePackDraftChange('tags', event.target.value)}
-                    />
-                  </label>
-                </div>
-              </div>
+            {editForm}
+            </>
             ) : null}
 
             <div className="detail-section">
@@ -1663,6 +1946,8 @@ export function PacksView() {
                         loading={previewLoading}
                         error={previewError}
                         onRetry={retryPreview}
+                        onEditingChange={setIsEditingKnowledgeObject}
+                        onSaved={handleKnowledgeObjectSaved}
                       />
                     )}
                   />
@@ -1683,6 +1968,7 @@ export function PacksView() {
         )}
       </div>
     </section>
+    </>
   );
 }
 
@@ -2073,6 +2359,8 @@ function KnowledgeObjectPreviewPanel({
   loading,
   error,
   onRetry,
+  onEditingChange,
+  onSaved,
 }: {
   packId: string;
   groupId?: string;
@@ -2082,6 +2370,8 @@ function KnowledgeObjectPreviewPanel({
   loading: boolean;
   error: Awaited<ReturnType<typeof useKnowledgeObjectPreview>>['error'];
   onRetry: () => void;
+  onEditingChange?: (isEditing: boolean) => void;
+  onSaved?: () => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [jsonDraft, setJsonDraft] = useState('');
@@ -2091,6 +2381,12 @@ function KnowledgeObjectPreviewPanel({
   const [isConfirming, setIsConfirming] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    onEditingChange?.(isEditing);
+  }, [isEditing, onEditingChange]);
+
+  useEffect(() => () => onEditingChange?.(false), [onEditingChange]);
 
   const lookupIdIndex = preview?.kind === 'lookup' ? preview.lookup.fields.indexOf('__id') : -1;
   const lookupEditable =
@@ -2171,7 +2467,7 @@ function KnowledgeObjectPreviewPanel({
 
     const typeLabel = preview.kind;
     const target = `${typeLabel} "${knowledgeObject.name}" in pack "${packId}" on ${fleetLabel}`;
-    let save: () => Promise<void>;
+    let save: () => Promise<string | void>;
     let summary: string;
 
     try {
@@ -2208,7 +2504,7 @@ function KnowledgeObjectPreviewPanel({
           describe('replace', 'Replace'),
           describe('remove', 'Delete'),
           addCount > 0 ? `Add ${addCount} new row${addCount === 1 ? '' : 's'} at the end` : null,
-        ].filter(Boolean).join('; ')}.`;
+        ].filter(Boolean).join('; ')}. If Cribl rejects the row edit, the app rewrites the whole lookup file with these same changes.`;
       }
     } catch (validationError) {
       setIsConfirming(false);
@@ -2227,12 +2523,15 @@ function KnowledgeObjectPreviewPanel({
     setMessage(`Saving the ${target}…`);
 
     try {
-      await save();
+      const method = await save();
       setIsEditing(false);
-      setMessage(`Saved the ${target}. The change is uncommitted; use Commit & deploy above to roll it out.`);
+      onSaved?.();
+      setMessage(
+        `Saved the ${target}${method === 'full-file' ? ' by rewriting the whole file (Cribl rejected the row-level edit)' : ''}. The change is uncommitted; use Commit & deploy above to roll it out.`,
+      );
       onRetry();
     } catch (saveError) {
-      setMessage(`Save failed, so nothing was changed: ${saveError instanceof Error ? saveError.message : String(saveError)}`);
+      setMessage(`Save failed, so nothing was changed: ${describeApiError(saveError)}`);
     } finally {
       setIsSaving(false);
     }
