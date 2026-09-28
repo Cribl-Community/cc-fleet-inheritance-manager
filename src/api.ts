@@ -1417,6 +1417,81 @@ export async function fetchKnowledgeObjectPreview(
   return null;
 }
 
+function packScopedUrl(packId: string, path: string, groupId?: string): string {
+  const scope = groupId ? `/m/${encodePathSegment(groupId)}` : '';
+
+  return `${requireBaseUrl()}${scope}/p/${encodePathSegment(packId)}${path}`;
+}
+
+async function patchJson(url: string, body: unknown): Promise<unknown> {
+  const response = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  return handleResponse<unknown>(response);
+}
+
+/** Replace a pipeline inside a pack. Cribl requires the complete pipeline definition. */
+export async function updatePackPipeline(
+  packId: string,
+  pipelineId: string,
+  definition: Record<string, unknown>,
+  groupId?: string,
+): Promise<void> {
+  await patchJson(packScopedUrl(packId, `/pipelines/${encodePathSegment(pipelineId)}`, groupId), {
+    ...definition,
+    id: pipelineId,
+  });
+}
+
+/** Replace one route entry inside a pack's routing table, keeping every other route in the table as-is. */
+export async function updatePackRoute(
+  packId: string,
+  routeId: string,
+  route: Record<string, unknown>,
+  groupId?: string,
+): Promise<void> {
+  const response = await fetch(packScopedUrl(packId, '/routes', groupId));
+  const tables = getCollectionItems(await handleResponse<unknown>(response));
+  const matchesRoute = (entry: unknown) =>
+    isRecord(entry) && (readString(entry.id) ?? readString(entry.name)) === routeId;
+  const table = tables.find((candidate) => Array.isArray(candidate.routes) && candidate.routes.some(matchesRoute));
+
+  if (!table || !Array.isArray(table.routes)) {
+    throw new ApiError(`Route ${routeId} was not found in pack ${packId}.`, 404);
+  }
+
+  const tableId = readString(table.id) ?? 'default';
+  const routes = table.routes.map((entry) => (matchesRoute(entry) ? { ...route, id: routeId } : entry));
+
+  await patchJson(packScopedUrl(packId, `/routes/${encodePathSegment(tableId)}`, groupId), { ...table, id: tableId, routes });
+}
+
+export type LookupRowPatch =
+  | {
+      op: 'add' | 'replace';
+      /** One-based row number, as reported in the lookup content's `__id` column. Ignored for placement by `add`. */
+      rowId: number;
+      /** Cell values in column order, without the `__id` column. */
+      value: string[];
+    }
+  | {
+      op: 'remove';
+      rowId: number;
+    };
+
+/** Apply row-level add, replace, and remove operations to a CSV lookup inside a pack. */
+export async function updatePackLookupRows(
+  packId: string,
+  lookupId: string,
+  patches: LookupRowPatch[],
+  groupId?: string,
+): Promise<void> {
+  await patchJson(packScopedUrl(packId, `/system/lookups/${encodePathSegment(lookupId)}/content`, groupId), patches);
+}
+
 export async function fetchFleetPacks(groupId: string, product: FleetProduct = 'stream'): Promise<Pack[]> {
   const groupScopedPacks = await fetchGroupScopedCollection(groupId, '/packs');
 

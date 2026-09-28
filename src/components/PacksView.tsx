@@ -8,7 +8,11 @@ import {
   fetchGroupPack,
   fetchPendingPackChanges,
   installEditedPack,
+  updatePackLookupRows,
+  updatePackPipeline,
+  updatePackRoute,
   type ExportedPackArchive,
+  type LookupRowPatch,
   type PendingPackChanges,
 } from '../api';
 import { nextSharedVersion, type PackMetadataEdits } from '../packArchive';
@@ -1650,6 +1654,10 @@ export function PacksView() {
                     })}
                     renderPreview={(knowledgeObject) => (
                       <KnowledgeObjectPreviewPanel
+                        key={`${knowledgeObject.type}:${knowledgeObject.id}:${selectedGroupId ?? ''}`}
+                        packId={selectedPack.id}
+                        groupId={selectedGroupId}
+                        fleetLabel={selectedUsageLocation?.fleetName ?? selectedGroupId ?? 'the Leader'}
                         knowledgeObject={knowledgeObject}
                         preview={preview}
                         loading={previewLoading}
@@ -2035,24 +2043,234 @@ function PackReferenceList({ references, emptyText }: { references: PackReferenc
   );
 }
 
+function parseJsonObjectDraft(draft: string, expectedId: string, label: string): Record<string, unknown> {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(draft);
+  } catch (error) {
+    throw new Error(`The ${label} JSON is not valid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`The ${label} JSON must be an object.`);
+  }
+
+  const record = parsed as Record<string, unknown>;
+  if (record.id !== undefined && record.id !== expectedId) {
+    throw new Error(`Renaming is not supported here. Keep "id" set to "${expectedId}".`);
+  }
+
+  return record;
+}
+
 function KnowledgeObjectPreviewPanel({
+  packId,
+  groupId,
+  fleetLabel,
   knowledgeObject,
   preview,
   loading,
   error,
   onRetry,
 }: {
+  packId: string;
+  groupId?: string;
+  fleetLabel: string;
   knowledgeObject: KnowledgeObject;
   preview: Awaited<ReturnType<typeof useKnowledgeObjectPreview>>['data'];
   loading: boolean;
   error: Awaited<ReturnType<typeof useKnowledgeObjectPreview>>['error'];
   onRetry: () => void;
 }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [jsonDraft, setJsonDraft] = useState('');
+  const [lookupDraft, setLookupDraft] = useState<string[][]>([]);
+  const [deletedRowIndexes, setDeletedRowIndexes] = useState<number[]>([]);
+  const [newLookupRows, setNewLookupRows] = useState<string[][]>([]);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const lookupIdIndex = preview?.kind === 'lookup' ? preview.lookup.fields.indexOf('__id') : -1;
+  const lookupEditable =
+    preview?.kind === 'lookup' &&
+    lookupIdIndex >= 0 &&
+    preview.lookup.rows.every((row) => row.length === preview.lookup.fields.length);
+  const canEdit = preview?.kind === 'pipeline' || preview?.kind === 'route' || lookupEditable;
+
+  const lookupPatches = useMemo((): LookupRowPatch[] => {
+    if (preview?.kind !== 'lookup' || !lookupEditable) {
+      return [];
+    }
+
+    const withoutId = (cells: string[]) => cells.filter((_, cellIndex) => cellIndex !== lookupIdIndex);
+    const rowIdAt = (rowIndex: number) => Number(preview.lookup.rows[rowIndex][lookupIdIndex]);
+    const replaces: LookupRowPatch[] = preview.lookup.rows.flatMap((row, rowIndex) => {
+      const draft = lookupDraft[rowIndex];
+
+      if (
+        deletedRowIndexes.includes(rowIndex) ||
+        !draft ||
+        draft.every((cell, cellIndex) => cell === String(row[cellIndex]))
+      ) {
+        return [];
+      }
+
+      return [{ op: 'replace' as const, rowId: rowIdAt(rowIndex), value: withoutId(draft) }];
+    });
+    // Remove from the bottom up so earlier row numbers stay valid while rows are deleted.
+    const removes: LookupRowPatch[] = deletedRowIndexes
+      .map(rowIdAt)
+      .sort((left, right) => right - left)
+      .map((rowId) => ({ op: 'remove' as const, rowId }));
+    const adds: LookupRowPatch[] = newLookupRows.map((row, index) => ({
+      op: 'add' as const,
+      rowId: preview.lookup.totalCount + index + 1,
+      value: withoutId(row),
+    }));
+
+    return [...replaces, ...removes, ...adds];
+  }, [deletedRowIndexes, lookupDraft, lookupEditable, lookupIdIndex, newLookupRows, preview]);
+
+  const updateNewLookupCell = (rowIndex: number, cellIndex: number, value: string) => {
+    setIsConfirming(false);
+    setNewLookupRows((current) =>
+      current.map((row, index) =>
+        index === rowIndex ? row.map((cell, index2) => (index2 === cellIndex ? value : cell)) : row,
+      ),
+    );
+  };
+
+  const startEditing = () => {
+    if (preview?.kind === 'pipeline') {
+      setJsonDraft(JSON.stringify(preview.pipeline.definition, null, 2));
+    } else if (preview?.kind === 'route') {
+      setJsonDraft(JSON.stringify(preview.route.raw, null, 2));
+    } else if (preview?.kind === 'lookup') {
+      setLookupDraft(preview.lookup.rows.map((row) => row.map(String)));
+      setDeletedRowIndexes([]);
+      setNewLookupRows([]);
+    }
+
+    setIsEditing(true);
+    setIsConfirming(false);
+    setMessage(null);
+  };
+
+  const cancelEditing = () => {
+    setIsEditing(false);
+    setIsConfirming(false);
+    setMessage('Edit cancelled. Nothing was changed.');
+  };
+
+  const handleSave = async () => {
+    if (!preview) {
+      return;
+    }
+
+    const typeLabel = preview.kind;
+    const target = `${typeLabel} "${knowledgeObject.name}" in pack "${packId}" on ${fleetLabel}`;
+    let save: () => Promise<void>;
+    let summary: string;
+
+    try {
+      if (preview.kind === 'pipeline') {
+        const definition = parseJsonObjectDraft(jsonDraft, knowledgeObject.id, 'pipeline');
+        if (JSON.stringify(definition) === JSON.stringify(preview.pipeline.definition)) {
+          setMessage('No changes to save.');
+          return;
+        }
+        save = () => updatePackPipeline(packId, knowledgeObject.id, definition, groupId);
+        summary = 'Cribl replaces the whole pipeline with the JSON above; any field you removed is deleted.';
+      } else if (preview.kind === 'route') {
+        const routeId = preview.route.id;
+        const route = parseJsonObjectDraft(jsonDraft, routeId, 'route');
+        if (JSON.stringify(route) === JSON.stringify(preview.route.raw)) {
+          setMessage('No changes to save.');
+          return;
+        }
+        save = () => updatePackRoute(packId, routeId, route, groupId);
+        summary = `Cribl rewrites routing table "${preview.route.tableId ?? 'default'}"; other routes in it are kept as they are now.`;
+      } else {
+        if (lookupPatches.length === 0) {
+          setMessage('No changes to save.');
+          return;
+        }
+        const patches = lookupPatches;
+        const describe = (op: LookupRowPatch['op'], verb: string) => {
+          const rowIds = patches.filter((patch) => patch.op === op).map((patch) => patch.rowId);
+          return rowIds.length > 0 ? `${verb} row${rowIds.length === 1 ? '' : 's'} ${rowIds.join(', ')}` : null;
+        };
+        const addCount = patches.filter((patch) => patch.op === 'add').length;
+        save = () => updatePackLookupRows(packId, knowledgeObject.id, patches, groupId);
+        summary = `${[
+          describe('replace', 'Replace'),
+          describe('remove', 'Delete'),
+          addCount > 0 ? `Add ${addCount} new row${addCount === 1 ? '' : 's'} at the end` : null,
+        ].filter(Boolean).join('; ')}.`;
+      }
+    } catch (validationError) {
+      setIsConfirming(false);
+      setMessage(validationError instanceof Error ? validationError.message : String(validationError));
+      return;
+    }
+
+    if (!isConfirming) {
+      setIsConfirming(true);
+      setMessage(`This will overwrite the ${target}. ${summary} This cannot be undone from this app. Click Confirm save to continue.`);
+      return;
+    }
+
+    setIsConfirming(false);
+    setIsSaving(true);
+    setMessage(`Saving the ${target}…`);
+
+    try {
+      await save();
+      setIsEditing(false);
+      setMessage(`Saved the ${target}. The change is uncommitted; use Commit & deploy above to roll it out.`);
+      onRetry();
+    } catch (saveError) {
+      setMessage(`Save failed, so nothing was changed: ${saveError instanceof Error ? saveError.message : String(saveError)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   return (
     <div className="detail-section">
-      <Text as="h3" variant="heading-sm">
-        Selected content
-      </Text>
+      <div className="list-card-header">
+        <Text as="h3" variant="heading-sm">
+          Selected content
+        </Text>
+        {!loading && !error && canEdit ? (
+          <div className="pill-row" style={{ marginTop: 0 }}>
+            {isEditing ? (
+              <>
+                <button type="button" className="pill" onClick={handleSave} disabled={isSaving}>
+                  {isSaving ? 'Saving…' : isConfirming ? 'Confirm save' : 'Save'}
+                </button>
+                <button type="button" className="pill pill-subtle" onClick={cancelEditing} disabled={isSaving}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button type="button" className="pill" onClick={startEditing}>
+                Edit
+              </button>
+            )}
+          </div>
+        ) : null}
+      </div>
+
+      {message ? (
+        <div style={{ marginTop: '0.5rem' }} role="status" aria-live="polite">
+          <Text variant="body-xs-normal" color="secondary">
+            {message}
+          </Text>
+        </div>
+      ) : null}
 
       {loading ? <SkeletonLoader count={2} /> : null}
       {!loading && error ? <ErrorState error={error} onRetry={onRetry} /> : null}
@@ -2061,6 +2279,8 @@ function KnowledgeObjectPreviewPanel({
           <div className="section-copy">
             <Text variant="body-sm-normal" color="secondary">
               Showing {preview.lookup.rows.length} of {preview.lookup.totalCount} rows for {knowledgeObject.name}.
+              {isEditing ? ' Only the rows shown here can be edited or deleted; new rows are added at the end of the file.' : ''}
+              {!lookupEditable ? ' Editing is unavailable because Cribl did not return row ids for this lookup.' : ''}
             </Text>
           </div>
           <div className="preview-table-wrap">
@@ -2070,27 +2290,140 @@ function KnowledgeObjectPreviewPanel({
                   {preview.lookup.fields.map((field) => (
                     <th key={field}>{field}</th>
                   ))}
+                  {isEditing ? <th aria-label="Row actions" /> : null}
                 </tr>
               </thead>
               <tbody>
-                {preview.lookup.rows.map((row, index) => (
-                  <tr key={`${knowledgeObject.id}:${index}`}>
+                {preview.lookup.rows.map((row, index) => {
+                  const isDeleted = isEditing && deletedRowIndexes.includes(index);
+
+                  return (
+                  <tr key={`${knowledgeObject.id}:${index}`} className={isDeleted ? 'preview-row-deleted' : undefined}>
                     {row.map((cell, cellIndex) => (
-                      <td key={`${knowledgeObject.id}:${index}:${cellIndex}`}>{String(cell)}</td>
+                      <td key={`${knowledgeObject.id}:${index}:${cellIndex}`}>
+                        {isEditing && !isDeleted && cellIndex !== lookupIdIndex ? (
+                          <input
+                            className="search-input preview-cell-input"
+                            aria-label={`${preview.lookup.fields[cellIndex]} for row ${String(row[lookupIdIndex])}`}
+                            value={lookupDraft[index]?.[cellIndex] ?? ''}
+                            disabled={isSaving}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setIsConfirming(false);
+                              setLookupDraft((current) =>
+                                current.map((draftRow, draftIndex) =>
+                                  draftIndex === index
+                                    ? draftRow.map((draftCell, draftCellIndex) => (draftCellIndex === cellIndex ? value : draftCell))
+                                    : draftRow,
+                                ),
+                              );
+                            }}
+                          />
+                        ) : (
+                          String(cell)
+                        )}
+                      </td>
                     ))}
+                    {isEditing ? (
+                      <td>
+                        <button
+                          type="button"
+                          className="pill pill-subtle"
+                          disabled={isSaving}
+                          onClick={() => {
+                            setIsConfirming(false);
+                            setDeletedRowIndexes((current) =>
+                              current.includes(index) ? current.filter((candidate) => candidate !== index) : [...current, index],
+                            );
+                          }}
+                        >
+                          {isDeleted ? 'Undo delete' : 'Delete'}
+                        </button>
+                      </td>
+                    ) : null}
                   </tr>
-                ))}
+                  );
+                })}
+                {isEditing
+                  ? newLookupRows.map((row, rowIndex) => (
+                      <tr key={`${knowledgeObject.id}:new:${rowIndex}`}>
+                        {row.map((cell, cellIndex) => (
+                          <td key={`${knowledgeObject.id}:new:${rowIndex}:${cellIndex}`}>
+                            {cellIndex === lookupIdIndex ? (
+                              'new'
+                            ) : (
+                              <input
+                                className="search-input preview-cell-input"
+                                aria-label={`${preview.lookup.fields[cellIndex]} for new row ${rowIndex + 1}`}
+                                value={cell}
+                                disabled={isSaving}
+                                onChange={(event) => updateNewLookupCell(rowIndex, cellIndex, event.target.value)}
+                              />
+                            )}
+                          </td>
+                        ))}
+                        <td>
+                          <button
+                            type="button"
+                            className="pill pill-subtle"
+                            disabled={isSaving}
+                            onClick={() => {
+                              setIsConfirming(false);
+                              setNewLookupRows((current) => current.filter((_, index) => index !== rowIndex));
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  : null}
               </tbody>
             </table>
           </div>
+          {isEditing ? (
+            <div className="pill-row">
+              <button
+                type="button"
+                className="pill"
+                disabled={isSaving}
+                onClick={() => {
+                  setIsConfirming(false);
+                  setNewLookupRows((current) => [...current, preview.lookup.fields.map(() => '')]);
+                }}
+              >
+                Add row
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
-      {!loading && !error && preview?.kind === 'pipeline' ? (
+      {!loading && !error && isEditing && (preview?.kind === 'pipeline' || preview?.kind === 'route') ? (
+        <div className="preview-card">
+          <label>
+            <Text variant="body-xs-semibold" color="secondary">
+              {preview.kind === 'pipeline' ? 'Pipeline definition (JSON)' : 'Route definition (JSON)'}
+            </Text>
+            <textarea
+              className="search-input preview-code-editor"
+              value={jsonDraft}
+              disabled={isSaving}
+              spellCheck={false}
+              rows={Math.min(Math.max(jsonDraft.split('\n').length, 8), 30)}
+              onChange={(event) => {
+                setJsonDraft(event.target.value);
+                setIsConfirming(false);
+              }}
+            />
+          </label>
+        </div>
+      ) : null}
+      {!loading && !error && !isEditing && preview?.kind === 'pipeline' ? (
         <div className="preview-card">
           <pre className="preview-code">{JSON.stringify(preview.pipeline.definition, null, 2)}</pre>
         </div>
       ) : null}
-      {!loading && !error && preview?.kind === 'route' ? (
+      {!loading && !error && !isEditing && preview?.kind === 'route' ? (
         <div className="preview-card">
           <div className="section-copy">
             <Text variant="body-sm-normal" color="secondary">

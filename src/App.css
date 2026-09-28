@@ -693,6 +693,29 @@ body {
   font-weight: 600;
 }
 
+.preview-code-editor {
+  width: 100%;
+  margin-top: 0.35rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+}
+
+.preview-cell-input {
+  min-width: 6rem;
+  margin: 0;
+}
+
+.preview-row-deleted td {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.preview-row-deleted td:last-child {
+  text-decoration: none;
+  opacity: 1;
+}
+
 .preview-code {
   margin: 0.75rem 0 0;
   overflow-x: auto;

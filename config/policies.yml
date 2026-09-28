@@ -38,6 +38,8 @@ policies:
   - object: '/master/groups/*/deploy'
     actions: ['PATCH']
 
-  # Knowledge objects within packs
+  # Knowledge objects within packs (PATCH to edit pipelines, routes, and lookup rows)
   - object: '/p/*'
-    actions: ['GET']
+    actions: ['GET', 'PATCH']
+  - object: '/m/:gid/p/*'
+    actions: ['GET', 'PATCH']
