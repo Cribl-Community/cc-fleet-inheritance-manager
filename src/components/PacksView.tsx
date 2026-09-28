@@ -34,6 +34,65 @@ function parseTags(value: string): string[] {
   return value.split(',').map((tag) => tag.trim()).filter(Boolean);
 }
 
+/** A group whose installed copy of the pack is overwritten on publish. Child fleets inheriting from it are listed with it. */
+interface PackPublishTarget {
+  groupId: string;
+  label: string;
+  product?: FleetProduct;
+  version?: string;
+  inheritingFleets: string[];
+}
+
+interface PackPublishResult {
+  groupId: string;
+  label: string;
+  tone: 'success' | 'warning' | 'error';
+  message: string;
+}
+
+function buildPublishTargets(pack: PackRelationshipSummary | null): PackPublishTarget[] {
+  if (!pack) {
+    return [];
+  }
+
+  const targets = new Map<string, PackPublishTarget>();
+
+  for (const location of pack.usageLocations) {
+    const groupId = location.inheritedFrom ?? location.fleetId;
+    const owner = pack.usageLocations.find((candidate) => candidate.fleetId === groupId);
+    const target = targets.get(groupId) ?? {
+      groupId,
+      label: owner?.fleetName ?? groupId,
+      product: owner?.product ?? location.product,
+      version: owner?.version ?? location.version,
+      inheritingFleets: [],
+    };
+
+    if (location.fleetId !== groupId) {
+      target.inheritingFleets.push(location.fleetName);
+    }
+
+    targets.set(groupId, target);
+  }
+
+  if (targets.size === 0) {
+    for (const groupId of pack.groupIds ?? []) {
+      targets.set(groupId, { groupId, label: groupId, version: pack.version, inheritingFleets: [] });
+    }
+  }
+
+  return [...targets.values()].sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function describeNextVersion(version: string | undefined): string {
+  try {
+    return bumpPatchVersion(version);
+  } catch {
+    // The exported package.json version is authoritative; it is checked during publish.
+    return 'next patch version';
+  }
+}
+
 const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
 const PACK_VIEW_MODES = ['catalog', 'sankey'] as const;
 const PACK_SANKEY_COLUMN_WIDTH = 220;
@@ -110,7 +169,9 @@ export function PacksView() {
   const [updatePackMessage, setUpdatePackMessage] = useState<string | null>(null);
   const [isEditingPack, setIsEditingPack] = useState(false);
   const [isConfirmingOverwrite, setIsConfirmingOverwrite] = useState(false);
-  const [allowOriginalConfigExport, setAllowOriginalConfigExport] = useState(false);
+  const [originalConfigGroupIds, setOriginalConfigGroupIds] = useState<string[]>([]);
+  const [publishGroupIds, setPublishGroupIds] = useState<string[]>([]);
+  const [publishResults, setPublishResults] = useState<{ packId: string; items: PackPublishResult[] } | null>(null);
   const [packDraft, setPackDraft] = useState<PackDraft | null>(null);
 
   const filteredPacks = useMemo(() => {
@@ -158,6 +219,7 @@ export function PacksView() {
   );
   const selectedGroupId = selectedUsageLocation?.fleetId;
   const selectedPackGroupId = selectedUsageLocation?.inheritedFrom ?? selectedGroupId ?? selectedPack?.groupIds?.[0];
+  const publishTargets = useMemo(() => buildPublishTargets(selectedPack), [selectedPack]);
   const {
     data: knowledgeObjects,
     loading: koLoading,
@@ -247,7 +309,8 @@ export function PacksView() {
     setPackDraft(buildPackDraft(selectedPack));
     setIsEditingPack(false);
     setIsConfirmingOverwrite(false);
-    setAllowOriginalConfigExport(false);
+    setOriginalConfigGroupIds([]);
+    setPublishGroupIds([]);
 
     if (visibleUsageLocations.length === 0) {
       setSelectedUsageContextKey(null);
@@ -294,6 +357,11 @@ export function PacksView() {
     setIsConfirmingOverwrite(false);
   }, []);
 
+  const setPublishTargetSelection = useCallback((groupIds: string[]) => {
+    setPublishGroupIds(groupIds);
+    setIsConfirmingOverwrite(false);
+  }, []);
+
   const handlePublishPack = useCallback(async () => {
     if (!selectedPack || !packDraft) {
       setUpdatePackMessage('No pack is selected, so publish cannot start.');
@@ -308,18 +376,24 @@ export function PacksView() {
       return;
     }
 
+    const targets = publishTargets.filter((target) => publishGroupIds.includes(target.groupId));
+
+    if (targets.length === 0) {
+      setUpdatePackMessage('Select at least one fleet to update.');
+      return;
+    }
+
     if (!isConfirmingOverwrite) {
-      let nextVersion = 'the next patch version';
-      try {
-        nextVersion = bumpPatchVersion(selectedPack.version);
-      } catch {
-        // The exported package.json version is authoritative; it is checked during publish.
-      }
+      const targetSummary = targets
+        .map((target) => `${target.label} → ${describeNextVersion(target.version ?? selectedPack.version)}`)
+        .join('; ');
+      const discardsLocalChanges = targets.some((target) => originalConfigGroupIds.includes(target.groupId));
 
       setIsConfirmingOverwrite(true);
       setUpdatePackMessage(
-        `This will replace "${packLabel}" in group "${selectedPackGroupId ?? 'default'}" with version ${nextVersion}, changing: ${changedFields.join(', ')}. ` +
-          `${allowOriginalConfigExport ? 'Local modifications to this pack will be discarded. ' : ''}This cannot be undone. Click Confirm overwrite to continue.`,
+        `This will replace "${packLabel}" in ${targets.length} fleet${targets.length === 1 ? '' : 's'} (${targetSummary}), changing: ${changedFields.join(', ')}. ` +
+          `${discardsLocalChanges ? 'Fleets marked "original configuration" will lose local modifications to this pack. ' : ''}` +
+          'This cannot be undone. Click Confirm overwrite to continue.',
       );
       return;
     }
@@ -327,35 +401,78 @@ export function PacksView() {
     setIsConfirmingOverwrite(false);
     setUpdatingPackId(selectedPack.id);
 
-    try {
-      const result = await publishPackEdits(selectedPack.id, packEdits, {
-        groupId: selectedPackGroupId,
-        allowOriginalConfigExport,
-        onProgress: setUpdatePackMessage,
-      });
+    const items: PackPublishResult[] = [];
+    const needsOriginalConfig: string[] = [];
 
-      const installedVersion = result.pack.version;
-      const outcome = installedVersion === result.newVersion
-        ? `Published "${packLabel}": Cribl now reports version ${installedVersion} (was ${result.previousVersion}).`
-        : `Upload finished, but Cribl reports version ${installedVersion ?? 'unknown'} instead of ${result.newVersion}. Check the pack in Cribl before relying on this change.`;
+    for (const [index, target] of targets.entries()) {
+      const prefix = `[${index + 1}/${targets.length}] ${target.label}: `;
 
-      setUpdatePackMessage([outcome, ...result.warnings].join(' '));
-      setAllowOriginalConfigExport(false);
+      try {
+        const result = await publishPackEdits(selectedPack.id, packEdits, {
+          groupId: target.groupId,
+          allowOriginalConfigExport: originalConfigGroupIds.includes(target.groupId),
+          onProgress: (step) => setUpdatePackMessage(prefix + step),
+        });
+        const installedVersion = result.pack.version;
+
+        items.push(
+          installedVersion === result.newVersion
+            ? {
+                groupId: target.groupId,
+                label: target.label,
+                tone: 'success',
+                message: [`Cribl now reports version ${installedVersion} (was ${result.previousVersion}).`, ...result.warnings].join(' '),
+              }
+            : {
+                groupId: target.groupId,
+                label: target.label,
+                tone: 'warning',
+                message: `Upload finished, but Cribl reports version ${installedVersion ?? 'unknown'} instead of ${result.newVersion}. Check the pack in Cribl before relying on this change.`,
+              },
+        );
+      } catch (error) {
+        if (error instanceof PackExportAssemblyError) {
+          needsOriginalConfig.push(target.groupId);
+          items.push({
+            groupId: target.groupId,
+            label: target.label,
+            tone: 'error',
+            message: `${error.message} You can publish this fleet from the original pack configuration instead, but that discards its local modifications to this pack. Click Publish again to review that option.`,
+          });
+        } else {
+          items.push({
+            groupId: target.groupId,
+            label: target.label,
+            tone: 'error',
+            message: error instanceof Error ? error.message : 'Publish failed.',
+          });
+        }
+      }
+
+      setPublishResults({ packId: selectedPack.id, items: [...items] });
+    }
+
+    const failedGroupIds = items.filter((item) => item.tone === 'error').map((item) => item.groupId);
+    const publishedCount = items.length - failedGroupIds.length;
+
+    setUpdatingPackId(null);
+    setUpdatePackMessage(
+      failedGroupIds.length === 0
+        ? `Published "${packLabel}" to ${publishedCount} of ${targets.length} fleet${targets.length === 1 ? '' : 's'}.`
+        : `Published "${packLabel}" to ${publishedCount} of ${targets.length} fleets. The failed fleets are still selected so you can retry them.`,
+    );
+
+    if (failedGroupIds.length === 0) {
+      setOriginalConfigGroupIds([]);
       setIsEditingPack(false);
       retry();
-    } catch (error) {
-      if (error instanceof PackExportAssemblyError) {
-        setAllowOriginalConfigExport(true);
-        setUpdatePackMessage(
-          `${error.message} You can publish from the original pack configuration instead, but that discards any local modifications to this pack. Click Publish again to review that option.`,
-        );
-      } else {
-        setUpdatePackMessage(error instanceof Error ? error.message : 'Publish failed.');
-      }
-    } finally {
-      setUpdatingPackId(null);
+    } else {
+      setPublishGroupIds(failedGroupIds);
+      setOriginalConfigGroupIds((current) =>
+        [...new Set([...current, ...needsOriginalConfig])].filter((groupId) => failedGroupIds.includes(groupId)),
+      );
     }
-  }, [allowOriginalConfigExport, isConfirmingOverwrite, packDraft, packEdits, retry, selectedPack, selectedPackGroupId]);
+  }, [isConfirmingOverwrite, originalConfigGroupIds, packDraft, packEdits, publishGroupIds, publishTargets, retry, selectedPack]);
 
   useEffect(() => {
     if (
@@ -805,7 +922,12 @@ export function PacksView() {
                   if (isEditingPack) {
                     setPackDraft(buildPackDraft(selectedPack));
                     setUpdatePackMessage(null);
-                    setAllowOriginalConfigExport(false);
+                    setOriginalConfigGroupIds([]);
+                    setPublishGroupIds([]);
+                  } else {
+                    const defaultTarget = publishTargets.find((target) => target.groupId === selectedPackGroupId) ?? publishTargets[0];
+                    setPublishGroupIds(defaultTarget ? [defaultTarget.groupId] : []);
+                    setPublishResults(null);
                   }
                   setIsEditingPack((current) => !current);
                   setIsConfirmingOverwrite(false);
@@ -838,22 +960,85 @@ export function PacksView() {
               </div>
             ) : null}
 
+            {publishResults?.packId === selectedPack.id && publishResults.items.length > 0 ? (
+              <ul className="publish-results" aria-label="Publish results by fleet">
+                {publishResults.items.map((item) => (
+                  <li key={item.groupId} className={`publish-result publish-result-${item.tone}`}>
+                    <Text variant="body-xs-semibold">
+                      {item.tone === 'success' ? 'Published' : item.tone === 'warning' ? 'Check' : 'Failed'}: {item.label}
+                    </Text>
+                    <Text variant="body-xs-normal" color="secondary">
+                      {item.message}
+                    </Text>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
             {isEditingPack && packDraft ? (
               <div className="detail-section" style={{ marginTop: '1rem' }}>
                 <Text as="h3" variant="heading-sm">
                   Edit pack metadata
                 </Text>
                 <div className="metadata-grid" style={{ marginTop: '0.75rem' }}>
-                  <label className="metadata-row">
-                    <Text variant="body-xs-semibold" color="secondary">
-                      Target group
-                    </Text>
-                    <input
-                      className="search-input"
-                      value={selectedPackGroupId ?? 'default'}
-                      readOnly
-                    />
-                  </label>
+                  <fieldset className="publish-targets" disabled={updatingPackId === selectedPack.id}>
+                    <legend>
+                      <Text variant="body-xs-semibold" color="secondary">
+                        Fleets to update ({publishGroupIds.length} of {publishTargets.length} selected)
+                      </Text>
+                    </legend>
+                    <div className="pill-row" style={{ marginTop: 0 }}>
+                      <button
+                        type="button"
+                        className="pill pill-subtle"
+                        onClick={() => setPublishTargetSelection(publishTargets.map((target) => target.groupId))}
+                      >
+                        Select all
+                      </button>
+                      <button type="button" className="pill pill-subtle" onClick={() => setPublishTargetSelection([])}>
+                        Clear
+                      </button>
+                    </div>
+                    {publishTargets.length === 0 ? (
+                      <Text variant="body-xs-normal" color="secondary">
+                        No fleets with this pack installed were found.
+                      </Text>
+                    ) : (
+                      publishTargets.map((target) => {
+                        const isChecked = publishGroupIds.includes(target.groupId);
+                        const usesOriginalConfig = originalConfigGroupIds.includes(target.groupId);
+
+                        return (
+                          <label key={target.groupId} className="publish-target">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() =>
+                                setPublishTargetSelection(
+                                  isChecked
+                                    ? publishGroupIds.filter((groupId) => groupId !== target.groupId)
+                                    : [...publishGroupIds, target.groupId],
+                                )
+                              }
+                            />
+                            <span className="publish-target-body">
+                              <span className="list-card-header">
+                                <Text variant="body-sm-semibold">{target.label}</Text>
+                                {target.product ? <FleetProductBadge product={target.product} /> : null}
+                              </span>
+                              <Text variant="body-xs-normal" color="secondary">
+                                {`${target.version ?? 'Unknown version'} → ${describeNextVersion(target.version ?? selectedPack.version)}`}
+                                {target.inheritingFleets.length > 0
+                                  ? ` · Also inherited by: ${target.inheritingFleets.join(', ')}`
+                                  : ''}
+                                {usesOriginalConfig ? ' · Will publish from original configuration (local modifications discarded)' : ''}
+                              </Text>
+                            </span>
+                          </label>
+                        );
+                      })
+                    )}
+                  </fieldset>
                   <label className="metadata-row">
                     <Text variant="body-xs-semibold" color="secondary">
                       Current version
