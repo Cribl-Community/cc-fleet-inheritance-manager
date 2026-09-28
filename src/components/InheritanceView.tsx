@@ -15,10 +15,10 @@ type InheritanceChartMode = (typeof INHERITANCE_CHART_MODES)[number];
 type FleetProductFilter = 'all' | FleetProduct;
 
 const SANKEY_COLUMN_WIDTH = 220;
-const SANKEY_COLUMN_GAP = 96;
-const SANKEY_NODE_HEIGHT = 102;
-const SANKEY_NODE_GAP = 22;
-const SANKEY_PADDING = 24;
+const SANKEY_COLUMN_GAP = 72;
+const SANKEY_NODE_HEIGHT = 96;
+const SANKEY_NODE_GAP = 16;
+const SANKEY_PADDING = 16;
 
 function sortKnowledgeObjectsByName(
   knowledgeObjects: KnowledgeObject[],
@@ -740,6 +740,8 @@ function InheritanceSankeyChart({ layout }: { layout: InheritanceSankeyLayout })
       <div className="inheritance-sankey-scroll">
         <svg
           className="inheritance-sankey-svg"
+          width={layout.width}
+          height={layout.height}
           viewBox={`0 0 ${layout.width} ${layout.height}`}
           role="img"
           aria-label="Fleet inheritance Sankey chart"

@@ -3,7 +3,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import type { FetchError, FleetProduct, KnowledgeObject, PackUsageLocation } from './types';
+import type { FetchError, FleetProduct, KnowledgeObject, PackKnowledgeInventory, PackUsageLocation } from './types';
 import { ApiError } from './api';
 import * as api from './api';
 
@@ -106,17 +106,33 @@ export function usePackKnowledgeObjectInventories(
 ) {
   const fetchFn = useCallback(async () => {
     if (!packId || usageLocations.length === 0) {
-      return new Map<string, KnowledgeObject[]>();
+      return new Map<string, PackKnowledgeInventory>();
     }
 
+    // Each fleet is read on its own so one unreadable fleet does not hide the others.
     const entries = await Promise.all(
-      usageLocations.map(async (usageLocation) => [
-        `${usageLocation.product}:${usageLocation.fleetId}`,
-        await api.fetchPackKnowledgeObjects(packId, usageLocation.fleetId),
-      ] as const),
+      usageLocations.map(async (usageLocation): Promise<readonly [string, PackKnowledgeInventory]> => {
+        const key = `${usageLocation.product}:${usageLocation.fleetId}`;
+
+        try {
+          return [
+            key,
+            await api.fetchPackKnowledgeInventory(
+              packId,
+              usageLocation.fleetId,
+              usageLocation.inheritedFrom ?? usageLocation.parentFleetId,
+            ),
+          ] as const;
+        } catch (error) {
+          return [
+            key,
+            { objects: [], failedTypes: [], error: error instanceof Error ? error.message : String(error) },
+          ] as const;
+        }
+      }),
     );
 
-    return new Map<string, KnowledgeObject[]>(entries);
+    return new Map<string, PackKnowledgeInventory>(entries);
   }, [packId, usageLocations]);
 
   return useAsync(fetchFn);

@@ -470,7 +470,7 @@ body {
 }
 
 .inheritance-summary-card {
-  padding: 0.875rem 1rem;
+  padding: 0.625rem 0.875rem;
   border: 1px solid var(--ds-border-neutral);
   border-radius: 0.75rem;
   background:
@@ -489,10 +489,10 @@ body {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 0.75rem;
-  padding: 1rem;
+  gap: 0.5rem;
+  padding: 0.75rem;
   border: 1px solid var(--ds-border-neutral);
-  border-radius: 1rem;
+  border-radius: 0.75rem;
   background:
     linear-gradient(180deg, rgba(26, 115, 232, 0.08), transparent 30%),
     var(--ds-background);
@@ -508,12 +508,12 @@ body {
 .inheritance-level-cards {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 0.5rem;
 }
 
 .inheritance-chart-card {
   position: relative;
-  padding: 1rem;
+  padding: 0.75rem 0.875rem 0.75rem 1rem;
   border: 1px solid var(--ds-border-neutral);
   border-radius: 0.875rem;
   background: var(--ds-background-elevated);
@@ -533,9 +533,9 @@ body {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.45rem;
-  margin-top: 0.75rem;
-  padding: 0.45rem 0.65rem;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  padding: 0.3rem 0.6rem;
   border: 1px dashed rgba(26, 115, 232, 0.4);
   border-radius: 999px;
   background: rgba(26, 115, 232, 0.08);
@@ -563,10 +563,10 @@ body {
 .inheritance-lineage-row {
   position: relative;
   display: grid;
-  gap: 0.75rem;
-  padding: 1rem;
+  gap: 0.5rem;
+  padding: 0.75rem;
   border: 1px solid var(--ds-border-neutral);
-  border-radius: 1rem;
+  border-radius: 0.75rem;
   background:
     radial-gradient(circle at top left, rgba(26, 115, 232, 0.14), transparent 35%),
     var(--ds-background);
@@ -577,7 +577,7 @@ body {
   position: absolute;
   left: 1rem;
   right: 1rem;
-  top: 2.55rem;
+  top: 2rem;
   height: 1px;
   background: linear-gradient(90deg, rgba(26, 115, 232, 0.35), transparent);
 }
@@ -597,9 +597,9 @@ body {
 }
 
 .inheritance-lineage-node {
-  min-width: 12rem;
-  max-width: 16rem;
-  padding: 0.875rem 1rem;
+  min-width: 10rem;
+  max-width: 14rem;
+  padding: 0.625rem 0.75rem;
   border: 1px solid var(--ds-border-neutral);
   border-radius: 0.875rem;
   background: var(--ds-background-elevated);
@@ -649,10 +649,11 @@ body {
   padding-bottom: 0.5rem;
 }
 
+/* Rendered at intrinsic size (1 viewBox unit = 1px); the scroll wrapper handles overflow.
+   Scaling to container width blew small trees up to 2-3x. */
 .inheritance-sankey-svg {
   display: block;
-  min-width: 100%;
-  height: auto;
+  max-width: none;
   border: 1px solid var(--ds-border-neutral);
   border-radius: 1rem;
   background:
@@ -665,7 +666,7 @@ body {
   fill: none;
   stroke: rgba(26, 115, 232, 0.42);
   stroke-linecap: round;
-  stroke-width: 8;
+  stroke-width: 5;
 }
 
 .inheritance-sankey-node {
@@ -699,10 +700,6 @@ body {
   background:
     linear-gradient(135deg, rgba(26, 115, 232, 0.08), transparent 65%),
     var(--ds-background);
-}
-
-.pack-sankey-svg {
-  min-width: 54rem;
 }
 
 .pack-sankey-link-reference {
@@ -983,7 +980,7 @@ body {
   }
 
   .inheritance-sankey-link {
-    stroke-width: 6;
+    stroke-width: 4;
   }
 
   .inheritance-lineage-track {

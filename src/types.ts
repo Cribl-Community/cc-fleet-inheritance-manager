@@ -68,6 +68,19 @@ export interface KnowledgeObject {
   pack?: string;
   source?: string;
   schema?: Record<string, unknown>;
+  /** Hash of the definition Cribl returned in the list response, used to compare content across fleets. */
+  fingerprint?: string;
+}
+
+/** Pack contents read from one fleet, with enough detail to know whether a comparison is trustworthy. */
+export interface PackKnowledgeInventory {
+  objects: KnowledgeObject[];
+  /** Object types that could not be read; the inventory is incomplete when this is non-empty. */
+  failedTypes: string[];
+  /** Fleet the objects were actually read from, when it is not the fleet itself (for example its parent). */
+  readFromGroupId?: string;
+  /** Set when nothing could be read for this fleet. */
+  error?: string;
 }
 
 export interface LookupContentPreview {

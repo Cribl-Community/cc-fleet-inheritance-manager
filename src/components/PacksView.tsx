@@ -5,6 +5,9 @@ import { useBlocker, type BlockerFunction } from 'react-router-dom';
 import {
   PackExportAssemblyError,
   commitConfigChanges,
+  copyPackLookupFile,
+  copyPackPipelineBetweenGroups,
+  copyPackRoutesBetweenGroups,
   describeApiError,
   deployGroup,
   exportPackForEditing,
@@ -19,7 +22,15 @@ import {
   type PendingPackChanges,
 } from '../api';
 import { nextSharedVersion, type PackMetadataEdits } from '../packArchive';
-import type { FleetProduct, KnowledgeObject, Pack, PackReference, PackRelationshipSummary, PackUsageLocation } from '../types';
+import type {
+  FleetProduct,
+  KnowledgeObject,
+  Pack,
+  PackKnowledgeInventory,
+  PackReference,
+  PackRelationshipSummary,
+  PackUsageLocation,
+} from '../types';
 import { FleetProductBadge } from './FleetProductBadge';
 import {
   useKnowledgeObjectPreview,
@@ -61,6 +72,14 @@ interface PackPublishTarget {
   /** Parent fleet target this fleet inherits the pack from, when the fleet hierarchy shows one. */
   parentGroupId?: string;
   parentLabel?: string;
+}
+
+/** A fleet a knowledge-object edit can also be written to. */
+interface KnowledgeObjectCopyTarget {
+  groupId: string;
+  label: string;
+  /** The fleet's inventory was read and does not contain this object. */
+  missing: boolean;
 }
 
 /** A fleet a commit is deployed to. */
@@ -243,6 +262,8 @@ function knownPackVersions(pack: PackRelationshipSummary | null): Array<string |
 }
 
 const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
+/** Select value for publishing each fleet's own contents rather than copying one fleet's. */
+const OWN_CONTENTS_KEY = '__own-contents__';
 const PACK_VIEW_MODES = ['catalog', 'sankey'] as const;
 const PACK_SANKEY_COLUMN_WIDTH = 220;
 const PACK_SANKEY_COLUMN_GAP = 84;
@@ -281,6 +302,40 @@ interface PackSankeyLayout {
   height: number;
 }
 
+interface InventoryDifference {
+  type: KnowledgeObject['type'];
+  id: string;
+  name: string;
+  /** differs: both have it with different content; missing: only the reference has it; extra: only this group has it. */
+  kind: 'differs' | 'missing' | 'extra';
+}
+
+function formatInventoryDifference(difference: InventoryDifference): string {
+  const reason =
+    difference.kind === 'extra'
+      ? 'only here'
+      : difference.kind === 'missing'
+        ? 'missing'
+        : difference.type === 'lookup'
+          ? 'file size differs'
+          : 'definition differs';
+
+  return `${difference.type} ${difference.name} (${reason})`;
+}
+
+/** Differences the app can fix by copying from the reference fleet (pipelines, route tables, existing CSV lookups). */
+function isCopyableDifference(difference: InventoryDifference): boolean {
+  if (difference.kind === 'extra') {
+    return false;
+  }
+
+  return (
+    difference.type === 'pipeline' ||
+    difference.type === 'route' ||
+    (difference.type === 'lookup' && difference.kind === 'differs' && /\.csv$/i.test(difference.id))
+  );
+}
+
 interface PackDeploymentGroup {
   key: string;
   versionLabel: string;
@@ -289,6 +344,12 @@ interface PackDeploymentGroup {
   configDriftLabel: string;
   inventoryLabel: string;
   inventorySignature: string;
+  /** False when at least one fleet's contents could not be fully read, so the group is not a real comparison. */
+  comparable: boolean;
+  notes: string[];
+  /** How this group's contents differ from the largest comparable group (empty for that group itself). */
+  differences: InventoryDifference[];
+  objects: KnowledgeObject[];
   usageLocations: PackUsageLocation[];
 }
 
@@ -327,6 +388,8 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
   const [isConfirmingOverwrite, setIsConfirmingOverwrite] = useState(false);
   const [originalConfigGroupIds, setOriginalConfigGroupIds] = useState<string[]>([]);
   const [publishGroupIds, setPublishGroupIds] = useState<string[]>([]);
+  /** When set, every selected fleet gets this fleet's pack contents instead of keeping its own. */
+  const [publishSourceGroupId, setPublishSourceGroupId] = useState<string | null>(null);
   const [highlightedTargetIds, setHighlightedTargetIds] = useState<string[]>([]);
   const [publishResults, setPublishResults] = useState<{ packId: string; items: PackPublishResult[] } | null>(null);
   const [deployPlan, setDeployPlan] = useState<{ packId: string; targets: PackDeployTarget[] } | null>(null);
@@ -340,6 +403,14 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
   const [isEditingKnowledgeObject, setIsEditingKnowledgeObject] = useState(false);
   const [savedUncommittedPackIds, setSavedUncommittedPackIds] = useState<string[]>([]);
   const [pendingPackSwitchId, setPendingPackSwitchId] = useState<string | null>(null);
+  const [groupSync, setGroupSync] = useState<{
+    packId: string;
+    groupKey: string;
+    confirming: boolean;
+    running: boolean;
+    message?: string;
+    items: PackPublishResult[];
+  } | null>(null);
 
   const filteredPacks = useMemo(() => {
     if (!packs) {
@@ -439,6 +510,10 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
     () => buildPackDeploymentGroups(visibleUsageLocations, packKnowledgeInventories),
     [packKnowledgeInventories, visibleUsageLocations],
   );
+  const comparableGroupCount = visibleDeploymentGroups.filter((group) => group.comparable).length;
+  const notComparedFleetCount = visibleDeploymentGroups
+    .filter((group) => !group.comparable)
+    .reduce((count, group) => count + group.usageLocations.length, 0);
 
   const visibleKnowledgeObjects = useMemo(() => {
     if (!knowledgeObjects) {
@@ -480,6 +555,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
     setIsConfirmingOverwrite(false);
     setOriginalConfigGroupIds([]);
     setPublishGroupIds([]);
+    setPublishSourceGroupId(null);
     setIsConfirmingDeploy(false);
     setPendingChanges(null);
 
@@ -541,19 +617,23 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
 
     const changedFields = Object.keys(packEdits);
     const packLabel = selectedPack.displayName ?? selectedPack.id;
+    const sourceTarget = publishSourceGroupId
+      ? publishTargets.find((target) => target.groupId === publishSourceGroupId)
+      : undefined;
 
-    if (changedFields.length === 0) {
-      setUpdatePackMessage('No changes to publish. Edit a field first.');
+    if (changedFields.length === 0 && !sourceTarget) {
+      setUpdatePackMessage('No changes to publish. Edit a field first, or choose a fleet to copy the pack contents from.');
       return;
     }
 
+    const selectedIds = sourceTarget ? [...new Set([sourceTarget.groupId, ...publishGroupIds])] : publishGroupIds;
     const targets = orderParentsFirst(
-      publishTargets.filter((target) => publishGroupIds.includes(target.groupId)),
+      publishTargets.filter((target) => selectedIds.includes(target.groupId)),
       publishTargets,
     );
 
-    if (targets.length === 0) {
-      setUpdatePackMessage('Select at least one fleet to update.');
+    if (targets.length === 0 || (sourceTarget && targets.length === 1 && changedFields.length === 0)) {
+      setUpdatePackMessage(sourceTarget ? 'Select at least one fleet to copy the contents to.' : 'Select at least one fleet to update.');
       return;
     }
 
@@ -561,12 +641,18 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       const targetSummary = targets.map((target) => `${target.label} (${target.version ?? 'unknown'})`).join('; ');
       const discardsLocalChanges = targets.some((target) => originalConfigGroupIds.includes(target.groupId));
       const childrenWithoutParent = targets.filter(
-        (target) => target.parentGroupId && !publishGroupIds.includes(target.parentGroupId),
+        (target) => target.parentGroupId && !selectedIds.includes(target.parentGroupId),
       );
+      const crossProductTargets = sourceTarget
+        ? targets.filter((target) => target.product && sourceTarget.product && target.product !== sourceTarget.product)
+        : [];
 
       setIsConfirmingOverwrite(true);
       setUpdatePackMessage(
-        `This will replace "${packLabel}" in ${targets.length} fleet${targets.length === 1 ? '' : 's'} (${targetSummary}) and set all of them to version ${plannedVersion}, the next version after the latest one any fleet reports. Changing: ${changedFields.join(', ')}. ` +
+        `This will replace "${packLabel}" in ${targets.length} fleet${targets.length === 1 ? '' : 's'} (${targetSummary}) and set all of them to version ${plannedVersion}, the next version after the latest one any fleet reports. ` +
+          `${changedFields.length > 0 ? `Changing: ${changedFields.join(', ')}. ` : ''}` +
+          `${sourceTarget ? `Every other fleet's pack contents (pipelines, routes, lookups, and any local modifications) are discarded and replaced with a copy of ${sourceTarget.label}'s contents. ` : ''}` +
+          `${crossProductTargets.length > 0 ? `${crossProductTargets.map((target) => target.label).join(', ')} ${crossProductTargets.length === 1 ? 'is' : 'are'} a different product than ${sourceTarget?.label} and will be skipped. ` : ''}` +
           `${discardsLocalChanges ? 'Fleets marked "original configuration" will lose local modifications to this pack. ' : ''}` +
           `${childrenWithoutParent.length > 0 ? `${childrenWithoutParent.map((target) => `${target.label} inherits from ${target.parentLabel}`).join('; ')}, so if it has no copy of its own it is only updated by also selecting its parent. ` : ''}` +
           'This cannot be undone. Click Confirm overwrite to continue.',
@@ -580,35 +666,98 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
     const items: PackPublishResult[] = [];
     const needsOriginalConfig: string[] = [];
     const exportedByGroup = new Map<string, ExportedPackArchive>();
+    /** Fleets whose pack is reinstalled over (force) with the source fleet's contents rather than upgraded. */
+    const replaceGroupIds = new Set<string>();
+    const probedVersions: Array<string | undefined> = [];
     const inheritingTargets: PackPublishTarget[] = [];
     const progress = (target: PackPublishTarget, step: string) =>
       setUpdatePackMessage(`[${targets.indexOf(target) + 1}/${targets.length}] ${target.label}: ${step}`);
     const fail = (target: PackPublishTarget, message: string) =>
       items.push({ groupId: target.groupId, label: target.label, tone: 'error', message });
+    const originalConfigHint =
+      'You can publish this fleet from the original pack configuration instead, but that discards its local modifications to this pack. Click Publish again to review that option.';
 
-    // Phase 1: export every selected fleet, so the new version can be chosen from what Cribl actually has installed.
-    for (const target of targets) {
+    if (sourceTarget) {
+      // Phase 1 (copy mode): export the source once; other fleets are only checked for a copy of their own.
+      let sourceArchive: ExportedPackArchive | undefined;
+
       try {
-        exportedByGroup.set(
-          target.groupId,
-          await exportPackForEditing(selectedPack.id, {
-            groupId: target.groupId,
-            allowOriginalConfigExport: originalConfigGroupIds.includes(target.groupId),
-            onProgress: (step) => progress(target, step),
-          }),
-        );
+        sourceArchive = await exportPackForEditing(selectedPack.id, {
+          groupId: sourceTarget.groupId,
+          allowOriginalConfigExport: originalConfigGroupIds.includes(sourceTarget.groupId),
+          onProgress: (step) => progress(sourceTarget, step),
+        });
       } catch (error) {
-        if (error instanceof PackExportAssemblyError && target.parentGroupId) {
-          // No standalone copy of the pack in this fleet to export; it inherits the pack from its parent.
-          inheritingTargets.push(target);
+        let reason = error instanceof Error ? error.message : 'Export failed.';
+
+        if (error instanceof PackExportAssemblyError && sourceTarget.parentGroupId) {
+          reason = `${sourceTarget.label} has no copy of the pack of its own to copy from; it inherits it from ${sourceTarget.parentLabel}. Choose ${sourceTarget.parentLabel} as the source instead.`;
         } else if (error instanceof PackExportAssemblyError) {
-          needsOriginalConfig.push(target.groupId);
-          fail(
-            target,
-            `${error.message} You can publish this fleet from the original pack configuration instead, but that discards its local modifications to this pack. Click Publish again to review that option.`,
+          needsOriginalConfig.push(sourceTarget.groupId);
+          reason = `${error.message} ${originalConfigHint}`;
+        }
+
+        for (const target of targets) {
+          fail(target, target === sourceTarget ? reason : `Not changed, because the contents of ${sourceTarget.label} could not be exported.`);
+        }
+      }
+
+      if (sourceArchive) {
+        exportedByGroup.set(sourceTarget.groupId, sourceArchive);
+
+        for (const target of targets) {
+          if (target === sourceTarget) {
+            continue;
+          }
+
+          if (target.product && sourceTarget.product && target.product !== sourceTarget.product) {
+            fail(target, `Skipped: packs cannot be copied between ${sourceTarget.product} and ${target.product} fleets.`);
+            continue;
+          }
+
+          if (target.parentGroupId) {
+            try {
+              const own = await exportPackForEditing(selectedPack.id, {
+                groupId: target.groupId,
+                onProgress: () => progress(target, 'Checking whether this fleet has its own copy of the pack…'),
+              });
+              probedVersions.push(own.version);
+            } catch (error) {
+              if (error instanceof PackExportAssemblyError) {
+                inheritingTargets.push(target);
+              } else {
+                fail(target, error instanceof Error ? error.message : 'Could not check this fleet.');
+              }
+              continue;
+            }
+          }
+
+          exportedByGroup.set(target.groupId, sourceArchive);
+          replaceGroupIds.add(target.groupId);
+        }
+      }
+    } else {
+      // Phase 1: export every selected fleet, so the new version can be chosen from what Cribl actually has installed.
+      for (const target of targets) {
+        try {
+          exportedByGroup.set(
+            target.groupId,
+            await exportPackForEditing(selectedPack.id, {
+              groupId: target.groupId,
+              allowOriginalConfigExport: originalConfigGroupIds.includes(target.groupId),
+              onProgress: (step) => progress(target, step),
+            }),
           );
-        } else {
-          fail(target, error instanceof Error ? error.message : 'Export failed.');
+        } catch (error) {
+          if (error instanceof PackExportAssemblyError && target.parentGroupId) {
+            // No standalone copy of the pack in this fleet to export; it inherits the pack from its parent.
+            inheritingTargets.push(target);
+          } else if (error instanceof PackExportAssemblyError) {
+            needsOriginalConfig.push(target.groupId);
+            fail(target, `${error.message} ${originalConfigHint}`);
+          } else {
+            fail(target, error instanceof Error ? error.message : 'Export failed.');
+          }
         }
       }
     }
@@ -619,6 +768,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       sharedVersion = nextSharedVersion([
         ...knownPackVersions(selectedPack),
         ...[...exportedByGroup.values()].map((exported) => exported.version),
+        ...probedVersions,
       ]);
     } catch (error) {
       for (const target of targets) {
@@ -638,12 +788,15 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       }
 
       try {
+        const replaced = replaceGroupIds.has(target.groupId);
         const result = await installEditedPack(selectedPack.id, exported, packEdits, {
           groupId: target.groupId,
           version: sharedVersion,
+          replaceExisting: replaced,
           onProgress: (step) => progress(target, step),
         });
         const installedVersion = result.pack.version;
+        const copyNote = replaced && sourceTarget ? `Contents replaced with a copy of ${sourceTarget.label}.` : '';
 
         items.push(
           installedVersion === sharedVersion
@@ -651,7 +804,11 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                 groupId: target.groupId,
                 label: target.label,
                 tone: 'success',
-                message: [`Cribl now reports version ${installedVersion} (was ${result.previousVersion}).`, ...result.warnings].join(' '),
+                message: [
+                  `Cribl now reports version ${installedVersion} (was ${replaced ? target.version ?? 'unknown' : result.previousVersion}).`,
+                  copyNote,
+                  ...result.warnings,
+                ].filter(Boolean).join(' '),
                 expectedVersion: sharedVersion,
               }
             : {
@@ -732,6 +889,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
 
     if (failedGroupIds.length === 0) {
       setOriginalConfigGroupIds([]);
+      setPublishSourceGroupId(null);
       setIsEditingPack(false);
       retry();
     } else {
@@ -740,7 +898,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
         [...new Set([...current, ...needsOriginalConfig])].filter((groupId) => failedGroupIds.includes(groupId)),
       );
     }
-  }, [isConfirmingOverwrite, originalConfigGroupIds, packDraft, packEdits, plannedVersion, publishGroupIds, publishTargets, retry, selectedPack]);
+  }, [isConfirmingOverwrite, originalConfigGroupIds, packDraft, packEdits, plannedVersion, publishGroupIds, publishSourceGroupId, publishTargets, retry, selectedPack]);
 
   const deployTargets = useMemo(
     () =>
@@ -901,6 +1059,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       setUpdatePackMessage(null);
       setOriginalConfigGroupIds([]);
       setPublishGroupIds([]);
+      setPublishSourceGroupId(null);
     } else {
       const defaultTarget = publishTargets.find((target) => target.groupId === selectedPackGroupId) ?? publishTargets[0];
       setPublishGroupIds(defaultTarget ? [defaultTarget.groupId] : []);
@@ -925,7 +1084,128 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       const packId = selectedPack.id;
       setSavedUncommittedPackIds((current) => (current.includes(packId) ? current : [...current, packId]));
     }
-  }, [selectedPack]);
+    retryInventories();
+  }, [retryInventories, selectedPack]);
+
+  /** The first fleet of the largest content-identical group; other groups are made identical to it. */
+  const referenceFleet = visibleDeploymentGroups.find((group) => group.comparable)?.usageLocations[0] ?? null;
+  const isGroupSyncRunning = Boolean(groupSync?.running);
+
+  const handleCancelGroupSync = useCallback(() => {
+    setGroupSync((current) =>
+      current ? { ...current, confirming: false, message: 'Cancelled. Nothing was changed.' } : current,
+    );
+  }, []);
+
+  const handleSyncGroup = useCallback(async (group: PackDeploymentGroup) => {
+    if (!selectedPack || !referenceFleet) {
+      return;
+    }
+
+    const packId = selectedPack.id;
+    const referenceInventory = packKnowledgeInventories?.get(`${referenceFleet.product}:${referenceFleet.fleetId}`);
+    const sourceGroupId = referenceInventory?.readFromGroupId ?? referenceFleet.fleetId;
+    const copyable = group.differences.filter(isCopyableDifference);
+    const notCopied = group.differences.filter((difference) => !isCopyableDifference(difference));
+    const pipelines = copyable.filter((difference) => difference.type === 'pipeline');
+    const lookups = copyable.filter((difference) => difference.type === 'lookup');
+    const copyRoutes = copyable.some((difference) => difference.type === 'route');
+    const fleetNames = group.usageLocations.map((location) => location.fleetName).join(', ');
+
+    if (!(groupSync?.packId === packId && groupSync.groupKey === group.key && groupSync.confirming)) {
+      setGroupSync({
+        packId,
+        groupKey: group.key,
+        confirming: true,
+        running: false,
+        items: [],
+        message:
+          `This overwrites the following in ${fleetNames} with the copies from ${referenceFleet.fleetName}: ` +
+          `${[
+            ...pipelines.map((difference) => `pipeline ${difference.name}${difference.kind === 'missing' ? ' (added)' : ''}`),
+            ...(copyRoutes ? ['the whole routing table'] : []),
+            ...lookups.map((difference) => `lookup ${difference.name} (whole file)`),
+          ].join(', ')}. ` +
+          `${notCopied.length > 0 ? `Not changed: ${notCopied.map(formatInventoryDifference).join(', ')}. ` : ''}` +
+          'This cannot be undone. Click Confirm overwrite to continue.',
+      });
+      return;
+    }
+
+    setGroupSync({ packId, groupKey: group.key, confirming: false, running: true, items: [], message: `Copying from ${referenceFleet.fleetName}…` });
+
+    const items: PackPublishResult[] = [];
+
+    for (const location of group.usageLocations) {
+      const targetGroupId = location.fleetId;
+      const done: string[] = [];
+      const failed: string[] = [];
+      const attempt = async (label: string, action: () => Promise<void>) => {
+        try {
+          await action();
+          done.push(label);
+        } catch (error) {
+          failed.push(`${label}: ${describeApiError(error)}`);
+        }
+      };
+
+      for (const difference of pipelines) {
+        await attempt(`pipeline ${difference.name}`, () =>
+          copyPackPipelineBetweenGroups(packId, difference.id, sourceGroupId, targetGroupId, difference.kind === 'differs'),
+        );
+      }
+      if (copyRoutes) {
+        await attempt('routing table', () => copyPackRoutesBetweenGroups(packId, sourceGroupId, targetGroupId));
+      }
+      for (const difference of lookups) {
+        await attempt(`lookup ${difference.name}`, () =>
+          copyPackLookupFile(packId, difference.id, sourceGroupId, targetGroupId),
+        );
+      }
+
+      items.push({
+        groupId: targetGroupId,
+        label: location.fleetName,
+        tone: failed.length === 0 ? 'success' : done.length > 0 ? 'warning' : 'error',
+        message: [
+          done.length > 0 ? `Copied ${done.join(', ')} from ${referenceFleet.fleetName}.` : '',
+          failed.length > 0 ? `Failed: ${failed.join('; ')}` : '',
+        ].filter(Boolean).join(' '),
+      });
+    }
+
+    const anyCopied = items.some((item) => item.tone !== 'error');
+    setGroupSync({
+      packId,
+      groupKey: group.key,
+      confirming: false,
+      running: false,
+      items,
+      message: anyCopied
+        ? 'Saved on the Leader. Use Commit & deploy to roll the changes out to the fleets. The groups below refresh to show the result.'
+        : 'Nothing was copied.',
+    });
+
+    if (anyCopied) {
+      handleKnowledgeObjectSaved();
+    }
+  }, [groupSync, handleKnowledgeObjectSaved, packKnowledgeInventories, referenceFleet, selectedPack]);
+
+  const buildCopyTargets = (knowledgeObject: KnowledgeObject): KnowledgeObjectCopyTarget[] =>
+    publishTargets
+      .filter((target) => target.groupId !== selectedGroupId)
+      .map((target) => {
+        const inventory = packKnowledgeInventories?.get(`${target.product ?? 'stream'}:${target.groupId}`);
+        const complete = inventory !== undefined && !describeInventoryGap(inventory);
+
+        return {
+          groupId: target.groupId,
+          label: `${target.label}${target.inheritingFleets.length > 0 ? ` (also inherited by ${target.inheritingFleets.map((child) => child.label).join(', ')})` : ''}`,
+          missing:
+            complete &&
+            !inventory.objects.some((candidate) => candidate.type === knowledgeObject.type && candidate.id === knowledgeObject.id),
+        };
+      });
 
   // Pending-change tracking for the action-bar layout's leave-page confirmation.
   const changedFieldCount = Object.keys(packEdits).length;
@@ -1028,6 +1308,9 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
   }
 
   const isPackBusy = selectedPack ? updatingPackId === selectedPack.id : false;
+  const publishSource = publishSourceGroupId
+    ? publishTargets.find((target) => target.groupId === publishSourceGroupId)
+    : undefined;
 
   const availableTargets = publishTargets.filter((target) => !publishGroupIds.includes(target.groupId));
   const chosenTargets = publishTargets.filter((target) => publishGroupIds.includes(target.groupId));
@@ -1077,6 +1360,11 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               : ''}
             {target.parentLabel ? ` · Inherits from ${target.parentLabel}` : ''}
             {isChosen && usesOriginalConfig ? ' · Will publish from original configuration (local modifications discarded)' : ''}
+            {isChosen && publishSource
+              ? target.groupId === publishSource.groupId
+                ? ' · Source of the contents'
+                : ` · Contents replaced with a copy of ${publishSource.label}`
+              : ''}
           </Text>
         </button>
       </li>
@@ -1089,6 +1377,35 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
         Edit pack metadata
       </Text>
       <div className="metadata-grid" style={{ marginTop: '0.75rem' }}>
+        {publishTargets.length > 1 ? (
+          <div className="metadata-row" style={{ gridColumn: '1 / -1' }}>
+            <SelectField
+              label="Pack contents"
+              size="sm"
+              value={publishSourceGroupId ?? OWN_CONTENTS_KEY}
+              disabled={isPackBusy}
+              onChange={(key) => {
+                const groupId = key === null || key === OWN_CONTENTS_KEY ? null : String(key);
+                setPublishSourceGroupId(groupId);
+                setPublishTargetSelection(groupId && !publishGroupIds.includes(groupId) ? [...publishGroupIds, groupId] : publishGroupIds);
+              }}
+              helperText={
+                publishSource
+                  ? `Every selected fleet gets an exact copy of ${publishSource.label}'s pack contents, replacing its own pipelines, routes, lookups, and local modifications.`
+                  : 'Each fleet keeps its own pipelines, routes, and lookups; only the metadata below changes, so fleets that differ stay different.'
+              }
+            >
+              <SelectField.Item id={OWN_CONTENTS_KEY} textValue="Keep each fleet's own contents">
+                Keep each fleet&apos;s own contents
+              </SelectField.Item>
+              {publishTargets.map((target) => (
+                <SelectField.Item key={target.groupId} id={target.groupId} textValue={`Copy contents from ${target.label}`}>
+                  Copy contents from {target.label}
+                </SelectField.Item>
+              ))}
+            </SelectField>
+          </div>
+        ) : null}
         <fieldset className="publish-targets" disabled={isPackBusy}>
           <legend>
             <Text variant="body-xs-semibold" color="secondary">
@@ -1250,6 +1567,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               changedFieldCount > 0
                 ? { label: `${changedFieldCount} unsaved change${changedFieldCount === 1 ? '' : 's'}`, tone: 'alert' as const }
                 : { label: 'Editing — no changes yet', tone: 'subtle' as const },
+              ...(publishSource ? [{ label: `Copying contents from ${publishSource.label}`, tone: 'alert' as const }] : []),
             ]
           : []),
         ...(isEditingKnowledgeObject ? [{ label: 'Knowledge object edit in progress', tone: 'alert' as const }] : []),
@@ -1726,8 +2044,13 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                       <span className="pill pill-subtle">Same version metadata across visible fleets</span>
                     )}
                     <span className="pill pill-subtle">
-                      {visibleDeploymentGroups.length} content-identical deployment group{visibleDeploymentGroups.length === 1 ? '' : 's'}
+                      {comparableGroupCount} content-identical deployment group{comparableGroupCount === 1 ? '' : 's'}
                     </span>
+                    {notComparedFleetCount > 0 ? (
+                      <span className="pill pack-version-pill">
+                        {notComparedFleetCount} fleet{notComparedFleetCount === 1 ? '' : 's'} not compared
+                      </span>
+                    ) : null}
                   </div>
                 </>
               ) : (
@@ -1745,9 +2068,19 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               </Text>
               <div className="section-copy">
                 <Text variant="body-sm-normal" color="secondary">
-                  These groups are based on actual fleet-scoped pack contents, not just the reported pack version.
+                  Fleets are grouped only when every pipeline and route definition matches, the same functions are present,
+                  and every lookup file has the same size (rows, descriptions and tags are not compared). Fleets whose contents
+                  could not be fully read are listed on their own and not compared.
                 </Text>
               </div>
+              {groupSync?.packId === selectedPack.id && groupSync.message ? (
+                <div className="section-copy" role="status">
+                  <Text variant="body-sm-normal">{groupSync.message}</Text>
+                </div>
+              ) : null}
+              {groupSync?.packId === selectedPack.id && groupSync.items.length > 0 ? (
+                <PublishResultList items={groupSync.items} label="Make identical results" successLabel="Updated" />
+              ) : null}
               {inventoriesLoading ? (
                 <SkeletonLoader count={2} />
               ) : inventoriesError ? (
@@ -1775,6 +2108,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                           </span>
                         </div>
                         <div className="pill-row" style={{ marginTop: '0.5rem' }}>
+                          {!group.comparable ? <span className="pill pack-version-pill">Not compared</span> : null}
                           <span className="pill pill-subtle">{group.statusLabel}</span>
                           <span className="pill pill-subtle">Inherited from {group.inheritedFromLabel}</span>
                           <span className="pill pill-subtle">{group.configDriftLabel}</span>
@@ -1782,9 +2116,43 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                         </div>
                         <div className="section-copy">
                           <Text variant="body-xs-normal" color="secondary">
-                            Fleets in this identical group: {group.usageLocations.map((usageLocation) => usageLocation.fleetName).join(', ')}
+                            {group.comparable ? 'Fleets in this identical group' : 'Fleet'}: {group.usageLocations.map((usageLocation) => usageLocation.fleetName).join(', ')}
                           </Text>
+                          {group.notes.map((note) => (
+                            <Text key={note} variant="body-xs-normal" color="secondary">
+                              {note}
+                            </Text>
+                          ))}
+                          {group.differences.length > 0 ? (
+                            <Text variant="body-xs-normal" color="secondary">
+                              Differs from the largest group: {group.differences.slice(0, 8).map(formatInventoryDifference).join(', ')}
+                              {group.differences.length > 8 ? `, and ${group.differences.length - 8} more` : ''}
+                            </Text>
+                          ) : null}
                         </div>
+                        {referenceFleet && group.differences.some(isCopyableDifference) ? (
+                          <div className="pill-row" style={{ marginTop: '0.5rem' }}>
+                            {groupSync?.packId === selectedPack.id && groupSync.groupKey === group.key && groupSync.confirming ? (
+                              <>
+                                <Button variant="primary" onClick={() => void handleSyncGroup(group)} disabled={isGroupSyncRunning}>
+                                  Confirm overwrite
+                                </Button>
+                                <Button variant="tertiary" onClick={handleCancelGroupSync} disabled={isGroupSyncRunning}>
+                                  Cancel
+                                </Button>
+                              </>
+                            ) : (
+                              <Button
+                                variant="secondary"
+                                onClick={() => void handleSyncGroup(group)}
+                                pending={isGroupSyncRunning && groupSync?.groupKey === group.key}
+                                disabled={isGroupSyncRunning || isPackBusy || isDeploying}
+                              >
+                                {`Make identical to ${referenceFleet.fleetName}`}
+                              </Button>
+                            )}
+                          </div>
+                        ) : null}
                       </div>
                     );
                   })}
@@ -1955,13 +2323,15 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               ) : visibleUsageLocations.length > 0 ? (
                 <div className="list-stack" style={{ marginTop: '0.75rem' }}>
                   {visibleUsageLocations.map((usageLocation) => {
-                    const inventory = packKnowledgeInventories?.get(`${usageLocation.product}:${usageLocation.fleetId}`) ?? [];
+                    const inventory = packKnowledgeInventories?.get(`${usageLocation.product}:${usageLocation.fleetId}`);
                     const inventoryLabel = formatInventoryLabel(inventory);
+                    const inventoryGap = describeInventoryGap(inventory);
+                    const selectedInventory = selectedUsageLocation
+                      ? packKnowledgeInventories?.get(`${selectedUsageLocation.product}:${selectedUsageLocation.fleetId}`)
+                      : undefined;
                     const differsFromSelected =
-                      selectedUsageLocation
-                        ? buildInventorySignature(inventory) !== buildInventorySignature(
-                            packKnowledgeInventories?.get(`${selectedUsageLocation.product}:${selectedUsageLocation.fleetId}`) ?? [],
-                          )
+                      selectedInventory && !inventoryGap && !describeInventoryGap(selectedInventory)
+                        ? buildInventorySignature(inventory?.objects ?? []) !== buildInventorySignature(selectedInventory.objects)
                         : false;
 
                     return (
@@ -1982,6 +2352,14 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                           </span>
                           <span className="pill pill-subtle">{inventoryLabel}</span>
                           {differsFromSelected ? <span className="pill pack-version-pill">Content differs</span> : null}
+                          {inventoryGap ? (
+                            <span className="pill pack-version-pill" title={inventoryGap}>
+                              Not compared
+                            </span>
+                          ) : null}
+                          {inventory?.readFromGroupId ? (
+                            <span className="pill pill-subtle">Read from {inventory.readFromGroupId}</span>
+                          ) : null}
                         </div>
                       </div>
                     );
@@ -2115,6 +2493,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                         onRetry={retryPreview}
                         onEditingChange={setIsEditingKnowledgeObject}
                         onSaved={handleKnowledgeObjectSaved}
+                        otherFleets={buildCopyTargets(knowledgeObject)}
                       />
                     )}
                   />
@@ -2166,19 +2545,28 @@ function formatPackStatusLabel(status: PackUsageLocation['status']): string {
 
 function buildPackDeploymentGroups(
   usageLocations: PackUsageLocation[],
-  inventories: Map<string, KnowledgeObject[]> | null,
+  inventories: Map<string, PackKnowledgeInventory> | null,
 ): PackDeploymentGroup[] {
   const groups = new Map<string, PackDeploymentGroup>();
 
   usageLocations.forEach((usageLocation) => {
-    const inventory = inventories?.get(`${usageLocation.product}:${usageLocation.fleetId}`) ?? [];
-    const inventorySignature = buildInventorySignature(inventory);
+    const locationKey = `${usageLocation.product}:${usageLocation.fleetId}`;
+    const inventory = inventories?.get(locationKey);
+    const gap = describeInventoryGap(inventory);
+    const inventorySignature = buildInventorySignature(inventory?.objects ?? []);
     const inventoryLabel = formatInventoryLabel(inventory);
-    const key = inventorySignature || 'empty-inventory';
+    // Fleets whose contents could not be fully read are never merged into a group with others.
+    const key = gap ? `incomplete:${locationKey}` : inventorySignature || 'empty-inventory';
+    const readFromNote = inventory?.readFromGroupId
+      ? `${usageLocation.fleetName} returned no contents of its own; they were read from ${inventory.readFromGroupId}, the fleet it inherits from.`
+      : undefined;
     const existing = groups.get(key);
 
     if (existing) {
       existing.usageLocations.push(usageLocation);
+      if (readFromNote) {
+        existing.notes.push(readFromNote);
+      }
       return;
     }
 
@@ -2190,6 +2578,10 @@ function buildPackDeploymentGroups(
       configDriftLabel: '',
       inventoryLabel,
       inventorySignature,
+      comparable: !gap,
+      notes: [...(gap ? [gap] : []), ...(readFromNote ? [readFromNote] : [])],
+      differences: [],
+      objects: inventory?.objects ?? [],
       usageLocations: [usageLocation],
     });
   });
@@ -2213,7 +2605,11 @@ function buildPackDeploymentGroups(
     );
   });
 
-  return Array.from(groups.values()).sort((left, right) => {
+  const sortedGroups = Array.from(groups.values()).sort((left, right) => {
+    if (left.comparable !== right.comparable) {
+      return left.comparable ? -1 : 1;
+    }
+
     const fleetCountOrder = right.usageLocations.length - left.usageLocations.length;
 
     if (fleetCountOrder !== 0) {
@@ -2222,6 +2618,52 @@ function buildPackDeploymentGroups(
 
     return left.inventoryLabel.localeCompare(right.inventoryLabel);
   });
+  const referenceGroup = sortedGroups.find((group) => group.comparable);
+
+  if (referenceGroup) {
+    sortedGroups.forEach((group) => {
+      if (group !== referenceGroup && group.comparable) {
+        group.differences = describeInventoryDifferences(group.objects, referenceGroup.objects);
+      }
+    });
+  }
+
+  return sortedGroups;
+}
+
+/** Lists objects that are missing, extra, or defined differently compared with the reference group. */
+function describeInventoryDifferences(
+  objects: KnowledgeObject[],
+  referenceObjects: KnowledgeObject[],
+): InventoryDifference[] {
+  const keyOf = (knowledgeObject: KnowledgeObject) => `${knowledgeObject.type}:${knowledgeObject.id}`;
+  const toDifference = (knowledgeObject: KnowledgeObject, kind: InventoryDifference['kind']): InventoryDifference => ({
+    type: knowledgeObject.type,
+    id: knowledgeObject.id,
+    name: knowledgeObject.name,
+    kind,
+  });
+  const reference = new Map(referenceObjects.map((knowledgeObject) => [keyOf(knowledgeObject), knowledgeObject]));
+  const own = new Map(objects.map((knowledgeObject) => [keyOf(knowledgeObject), knowledgeObject]));
+  const differences: InventoryDifference[] = [];
+
+  own.forEach((knowledgeObject, key) => {
+    const match = reference.get(key);
+
+    if (!match) {
+      differences.push(toDifference(knowledgeObject, 'extra'));
+    } else if (match.fingerprint !== knowledgeObject.fingerprint) {
+      differences.push(toDifference(knowledgeObject, 'differs'));
+    }
+  });
+
+  reference.forEach((knowledgeObject, key) => {
+    if (!own.has(key)) {
+      differences.push(toDifference(knowledgeObject, 'missing'));
+    }
+  });
+
+  return differences.sort((left, right) => formatInventoryDifference(left).localeCompare(formatInventoryDifference(right)));
 }
 
 function hasPackVersionMismatch(groups: PackDeploymentGroup[]): boolean {
@@ -2247,22 +2689,45 @@ function summarizeGroupValues(values: string[], mixedLabel: string): string {
   return mixedLabel;
 }
 
+/** Why a fleet's contents cannot be compared, or undefined when every object type was read. */
+function describeInventoryGap(inventory: PackKnowledgeInventory | undefined): string | undefined {
+  if (!inventory) {
+    return 'Contents were not loaded.';
+  }
+
+  if (inventory.error) {
+    return `Contents could not be read: ${inventory.error}`;
+  }
+
+  if (inventory.failedTypes.length > 0) {
+    return `Could not read ${inventory.failedTypes.map((type) => `${type}s`).join(', ')}, so this fleet is not compared.`;
+  }
+
+  return undefined;
+}
+
 function buildInventorySignature(inventory: KnowledgeObject[]): string {
   const normalized = [...inventory]
     .sort((left, right) => `${left.type}:${left.id}`.localeCompare(`${right.type}:${right.id}`))
-    .map((knowledgeObject) => `${knowledgeObject.type}:${knowledgeObject.id}`);
+    .map((knowledgeObject) => `${knowledgeObject.type}:${knowledgeObject.id}:${knowledgeObject.fingerprint ?? ''}`);
 
   return normalized.join('|');
 }
 
-function formatInventoryLabel(inventory: KnowledgeObject[] | undefined): string {
-  if (!inventory || inventory.length === 0) {
+function formatInventoryLabel(inventory: PackKnowledgeInventory | undefined): string {
+  if (inventory?.error) {
+    return 'Contents unavailable';
+  }
+
+  const objects = inventory?.objects ?? [];
+
+  if (objects.length === 0) {
     return 'No knowledge objects';
   }
 
   const counts = new Map<string, number>();
 
-  inventory.forEach((knowledgeObject) => {
+  objects.forEach((knowledgeObject) => {
     counts.set(knowledgeObject.type, (counts.get(knowledgeObject.type) ?? 0) + 1);
   });
 
@@ -2410,6 +2875,8 @@ function PackRelationshipSankeyChart({
       <div className="inheritance-sankey-scroll">
         <svg
           className="inheritance-sankey-svg pack-sankey-svg"
+          width={layout.width}
+          height={layout.height}
           viewBox={`0 0 ${layout.width} ${layout.height}`}
           role="img"
           aria-label="Pack relationship Sankey chart"
@@ -2528,6 +2995,7 @@ function KnowledgeObjectPreviewPanel({
   onRetry,
   onEditingChange,
   onSaved,
+  otherFleets = [],
 }: {
   packId: string;
   groupId?: string;
@@ -2539,15 +3007,19 @@ function KnowledgeObjectPreviewPanel({
   onRetry: () => void;
   onEditingChange?: (isEditing: boolean) => void;
   onSaved?: () => void;
+  /** Other fleets holding their own copy of the pack, which the same edit can also be written to. */
+  otherFleets?: KnowledgeObjectCopyTarget[];
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [jsonDraft, setJsonDraft] = useState('');
   const [lookupDraft, setLookupDraft] = useState<string[][]>([]);
   const [deletedRowIndexes, setDeletedRowIndexes] = useState<number[]>([]);
   const [newLookupRows, setNewLookupRows] = useState<string[][]>([]);
+  const [alsoApplyGroupIds, setAlsoApplyGroupIds] = useState<string[]>([]);
   const [isConfirming, setIsConfirming] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [copyResults, setCopyResults] = useState<PackPublishResult[]>([]);
 
   useEffect(() => {
     onEditingChange?.(isEditing);
@@ -2618,6 +3090,8 @@ function KnowledgeObjectPreviewPanel({
 
     setIsEditing(true);
     setIsConfirming(false);
+    setAlsoApplyGroupIds([]);
+    setCopyResults([]);
     setMessage(null);
   };
 
@@ -2634,29 +3108,33 @@ function KnowledgeObjectPreviewPanel({
 
     const typeLabel = preview.kind;
     const target = `${typeLabel} "${knowledgeObject.name}" in pack "${packId}" on ${fleetLabel}`;
+    const copyTargets = otherFleets.filter((fleet) => alsoApplyGroupIds.includes(fleet.groupId));
     let save: () => Promise<string | void>;
+    let copyTo: (targetGroupId: string) => Promise<void>;
     let summary: string;
 
     try {
       if (preview.kind === 'pipeline') {
         const definition = parseJsonObjectDraft(jsonDraft, knowledgeObject.id, 'pipeline');
-        if (JSON.stringify(definition) === JSON.stringify(preview.pipeline.definition)) {
+        if (JSON.stringify(definition) === JSON.stringify(preview.pipeline.definition) && copyTargets.length === 0) {
           setMessage('No changes to save.');
           return;
         }
         save = () => updatePackPipeline(packId, knowledgeObject.id, definition, groupId);
+        copyTo = (targetGroupId) => updatePackPipeline(packId, knowledgeObject.id, definition, targetGroupId);
         summary = 'Cribl replaces the whole pipeline with the JSON above; any field you removed is deleted.';
       } else if (preview.kind === 'route') {
         const routeId = preview.route.id;
         const route = parseJsonObjectDraft(jsonDraft, routeId, 'route');
-        if (JSON.stringify(route) === JSON.stringify(preview.route.raw)) {
+        if (JSON.stringify(route) === JSON.stringify(preview.route.raw) && copyTargets.length === 0) {
           setMessage('No changes to save.');
           return;
         }
         save = () => updatePackRoute(packId, routeId, route, groupId);
+        copyTo = (targetGroupId) => updatePackRoute(packId, routeId, route, targetGroupId);
         summary = `Cribl rewrites routing table "${preview.route.tableId ?? 'default'}"; other routes in it are kept as they are now.`;
       } else {
-        if (lookupPatches.length === 0) {
+        if (lookupPatches.length === 0 && copyTargets.length === 0) {
           setMessage('No changes to save.');
           return;
         }
@@ -2666,12 +3144,18 @@ function KnowledgeObjectPreviewPanel({
           return rowIds.length > 0 ? `${verb} row${rowIds.length === 1 ? '' : 's'} ${rowIds.join(', ')}` : null;
         };
         const addCount = patches.filter((patch) => patch.op === 'add').length;
-        save = () => updatePackLookupRows(packId, knowledgeObject.id, patches, groupId);
-        summary = `${[
-          describe('replace', 'Replace'),
-          describe('remove', 'Delete'),
-          addCount > 0 ? `Add ${addCount} new row${addCount === 1 ? '' : 's'} at the end` : null,
-        ].filter(Boolean).join('; ')}. If Cribl rejects the row edit, the app rewrites the whole lookup file with these same changes.`;
+        save = async () => (patches.length > 0 ? updatePackLookupRows(packId, knowledgeObject.id, patches, groupId) : undefined);
+        copyTo = (targetGroupId) => copyPackLookupFile(packId, knowledgeObject.id, groupId, targetGroupId);
+        summary = patches.length > 0
+          ? `${[
+              describe('replace', 'Replace'),
+              describe('remove', 'Delete'),
+              addCount > 0 ? `Add ${addCount} new row${addCount === 1 ? '' : 's'} at the end` : null,
+            ].filter(Boolean).join('; ')}. If Cribl rejects the row edit, the app rewrites the whole lookup file with these same changes.`
+          : 'No rows change here.';
+        if (copyTargets.length > 0) {
+          summary += ` The other fleets get a copy of the whole saved file from ${fleetLabel}, replacing every row they have now.`;
+        }
       }
     } catch (validationError) {
       setIsConfirming(false);
@@ -2679,29 +3163,53 @@ function KnowledgeObjectPreviewPanel({
       return;
     }
 
+    const copySummary = copyTargets.length > 0
+      ? ` The same ${typeLabel} is also overwritten in: ${copyTargets.map((fleet) => fleet.label).join(', ')}.`
+      : '';
+
     if (!isConfirming) {
       setIsConfirming(true);
-      setMessage(`This will overwrite the ${target}. ${summary} This cannot be undone from this app. Click Confirm save to continue.`);
+      setMessage(`This will overwrite the ${target}.${copySummary} ${summary} This cannot be undone from this app. Click Confirm save to continue.`);
       return;
     }
 
     setIsConfirming(false);
     setIsSaving(true);
+    setCopyResults([]);
     setMessage(`Saving the ${target}…`);
 
+    let method: string | void;
     try {
-      const method = await save();
-      setIsEditing(false);
-      onSaved?.();
-      setMessage(
-        `Saved the ${target}${method === 'full-file' ? ' by rewriting the whole file (Cribl rejected the row-level edit)' : ''}. The change is uncommitted; use Commit & deploy above to roll it out.`,
-      );
-      onRetry();
+      method = await save();
     } catch (saveError) {
-      setMessage(`Save failed, so nothing was changed: ${describeApiError(saveError)}`);
-    } finally {
+      setMessage(`Save failed, so nothing was changed in any fleet: ${describeApiError(saveError)}`);
       setIsSaving(false);
+      return;
     }
+
+    const results: PackPublishResult[] = [];
+    for (const [index, fleet] of copyTargets.entries()) {
+      setMessage(`[${index + 1}/${copyTargets.length}] Applying the ${typeLabel} to ${fleet.label}…`);
+
+      try {
+        await copyTo(fleet.groupId);
+        results.push({ groupId: fleet.groupId, label: fleet.label, tone: 'success', message: `Overwritten with the ${typeLabel} from ${fleetLabel}.` });
+      } catch (copyError) {
+        results.push({ groupId: fleet.groupId, label: fleet.label, tone: 'error', message: describeApiError(copyError) });
+      }
+    }
+
+    const failedCount = results.filter((result) => result.tone === 'error').length;
+    setIsEditing(false);
+    setIsSaving(false);
+    setCopyResults(results);
+    onSaved?.();
+    setMessage(
+      `Saved the ${target}${method === 'full-file' ? ' by rewriting the whole file (Cribl rejected the row-level edit)' : ''}` +
+        `${copyTargets.length > 0 ? ` and applied it to ${copyTargets.length - failedCount} of ${copyTargets.length} other fleet${copyTargets.length === 1 ? '' : 's'}` : ''}. ` +
+        'The change is uncommitted; use Commit & deploy above to roll it out.',
+    );
+    onRetry();
   };
 
   return (
@@ -2736,6 +3244,45 @@ function KnowledgeObjectPreviewPanel({
             {message}
           </Text>
         </div>
+      ) : null}
+
+      {copyResults.length > 0 ? (
+        <PublishResultList items={copyResults} label="Results in other fleets" successLabel="Applied" />
+      ) : null}
+
+      {isEditing && otherFleets.length > 0 ? (
+        <fieldset className="publish-targets" disabled={isSaving}>
+          <legend>
+            <Text variant="body-xs-semibold" color="secondary">
+              Also apply to ({alsoApplyGroupIds.length} of {otherFleets.length} selected)
+            </Text>
+          </legend>
+          <Text variant="body-xs-normal" color="secondary">
+            {preview?.kind === 'lookup'
+              ? `Selected fleets get a copy of the whole file as saved on ${fleetLabel}.`
+              : `Selected fleets get the same ${preview?.kind ?? 'definition'} as saved on ${fleetLabel}.`}
+          </Text>
+          {otherFleets.map((fleet) => (
+            <label key={fleet.groupId} className="list-card-header" style={{ justifyContent: 'flex-start', gap: '0.5rem' }}>
+              <input
+                type="checkbox"
+                checked={alsoApplyGroupIds.includes(fleet.groupId)}
+                disabled={fleet.missing}
+                onChange={(event) => {
+                  const { checked } = event.target;
+                  setIsConfirming(false);
+                  setAlsoApplyGroupIds((current) =>
+                    checked ? [...current, fleet.groupId] : current.filter((candidate) => candidate !== fleet.groupId),
+                  );
+                }}
+              />
+              <Text variant="body-xs-normal">
+                {fleet.label}
+                {fleet.missing ? ' (this fleet has no such object)' : ''}
+              </Text>
+            </label>
+          ))}
+        </fieldset>
       ) : null}
 
       {loading ? <SkeletonLoader count={2} /> : null}

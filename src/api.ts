@@ -11,6 +11,7 @@ import type {
   KnowledgeObjectPreview,
   LookupContentPreview,
   Pack,
+  PackKnowledgeInventory,
   PackReference,
   PackRelationshipSummary,
   PackUsageLocation,
@@ -19,6 +20,7 @@ import type {
 } from './types';
 import { readPackArchiveVersion, rewritePackArchive, type PackMetadataEdits } from './packArchive.ts';
 import { applyLookupRowPatches, type LookupRowPatch } from './lookupCsv.ts';
+import { fingerprintContent } from './fingerprint.ts';
 
 type ApiRecord = Record<string, unknown>;
 const FLEET_PRODUCTS: FleetProduct[] = ['stream', 'edge'];
@@ -323,6 +325,27 @@ function mapPack(item: ApiRecord, groupId?: string): Pack {
   return pack;
 }
 
+/**
+ * The part of a list item that defines the object's content. Per-fleet metadata (lookup description, tags and
+ * mode; function load details) is left out so fleets with identical contents fingerprint the same.
+ */
+function knowledgeObjectContent(item: ApiRecord, type: KnowledgeObject['type']): unknown {
+  if (type === 'pipeline') {
+    return item.conf ?? item;
+  }
+
+  if (type === 'lookup') {
+    const fileInfo = isRecord(item.fileInfo) ? item.fileInfo : undefined;
+    return { size: item.size ?? fileInfo?.size ?? null };
+  }
+
+  if (type === 'function') {
+    return { id: item.id ?? item.name ?? null };
+  }
+
+  return item;
+}
+
 function mapKnowledgeObject(item: ApiRecord, type: KnowledgeObject['type'], packId: string): KnowledgeObject {
   return {
     id: readString(item.id) ?? readString(item.name) ?? `${type}-${packId}`,
@@ -330,6 +353,7 @@ function mapKnowledgeObject(item: ApiRecord, type: KnowledgeObject['type'], pack
     type,
     description: readString(item.description),
     pack: packId,
+    fingerprint: fingerprintContent(knowledgeObjectContent(item, type)),
   };
 }
 
@@ -346,6 +370,7 @@ function mapRouteTableEntries(item: ApiRecord, packId: string): KnowledgeObject[
       type: 'route' as const,
       description: readString(route.description),
       pack: packId,
+      fingerprint: fingerprintContent(route),
     }));
 }
 
@@ -947,14 +972,16 @@ export async function exportPackForEditing(
 /**
  * Rewrite an exported pack's package.json with the edits, upload it, and upgrade the pack to it.
  * `version` sets the exact new version; without it the exported version's patch number is bumped.
+ * `replaceExisting` reinstalls the pack over the existing copy (force) instead of upgrading it, so the
+ * group ends up with exactly the archive's contents rather than keeping its own local modifications.
  */
 export async function installEditedPack(
   packId: string,
   exported: ExportedPackArchive,
   edits: PackMetadataEdits,
-  options: { groupId?: string; version?: string; onProgress?: (step: string) => void } = {},
+  options: { groupId?: string; version?: string; replaceExisting?: boolean; onProgress?: (step: string) => void } = {},
 ): Promise<PublishPackEditsResult> {
-  const { groupId, version, onProgress } = options;
+  const { groupId, version, replaceExisting = false, onProgress } = options;
   const filename = `${packId}.crbl`;
 
   onProgress?.('Applying your edits to package.json…');
@@ -963,8 +990,11 @@ export async function installEditedPack(
   onProgress?.(`Uploading version ${rewritten.newVersion}…`);
   const source = await uploadPack(new Blob([rewritten.archive]), filename, groupId);
 
-  onProgress?.(`Installing version ${rewritten.newVersion}…`);
-  const pack = await updatePack(packId, source, { minor: true, allowCustomFunctions: true, groupId });
+  onProgress?.(`${replaceExisting ? 'Replacing the pack with' : 'Installing'} version ${rewritten.newVersion}…`);
+  const pack =
+    replaceExisting && groupId
+      ? await reinstallPack(packId, source, groupId)
+      : await updatePack(packId, source, { minor: true, allowCustomFunctions: true, groupId });
 
   const warnings = [...rewritten.warnings];
   if (exported.exportMode === 'default_only') {
@@ -989,6 +1019,25 @@ export async function publishPackEdits(
   const exported = await exportPackForEditing(packId, options);
 
   return installEditedPack(packId, exported, edits, options);
+}
+
+/** Install an uploaded pack over the existing pack with the same ID in a group (`force`), replacing all of its contents. */
+export async function reinstallPack(packId: string, source: string, groupId: string): Promise<Pack> {
+  const response = await fetch(`${requireBaseUrl()}/m/${encodeURIComponent(groupId)}/packs`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ id: packId, source, force: true, allowCustomFunctions: true }),
+  });
+  const payload = await handleResponse<unknown>(response);
+  const item = getCollectionItems(payload)[0] ?? (isRecord(payload) ? payload : undefined);
+
+  if (!item) {
+    throw new ApiError(`Unexpected pack install response for ${packId}`, response.status, payload);
+  }
+
+  return mapPack(item, groupId);
 }
 
 export async function updatePack(
@@ -1121,23 +1170,64 @@ async function fetchKnowledgeObjectsForBasePath(basePath: string, packId: string
   ));
 }
 
-async function fetchKnowledgeObjectsForGroup(groupId: string, packId: string): Promise<KnowledgeObject[]> {
+const KNOWLEDGE_OBJECT_TYPES = ['function', 'pipeline', 'lookup', 'route'] as const;
+
+async function readKnowledgeObjectsForGroup(
+  groupId: string,
+  packId: string,
+): Promise<{ objects: KnowledgeObject[]; failedTypes: string[]; firstError?: unknown }> {
   const encodedPackId = encodePathSegment(packId);
-  const [functions, pipelines, lookups, routes] = await Promise.allSettled([
+  const results = await Promise.allSettled([
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'function', `/p/${encodedPackId}/functions?showHidden=true`),
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'pipeline', `/p/${encodedPackId}/pipelines`),
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'lookup', `/p/${encodedPackId}/system/lookups`),
     fetchPackRoutesForGroup(groupId, packId),
   ]);
+  const failedTypes = KNOWLEDGE_OBJECT_TYPES.filter((_, index) => results[index].status === 'rejected');
+  const firstFailure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
 
-  const failures = [functions, pipelines, lookups, routes].filter((result) => result.status === 'rejected');
-  if (failures.length === 4) {
-    throw (failures[0] as PromiseRejectedResult).reason;
+  return {
+    objects: sortKnowledgeObjects(results.flatMap((result) => (result.status === 'fulfilled' ? result.value : []))),
+    failedTypes,
+    firstError: firstFailure?.reason,
+  };
+}
+
+async function fetchKnowledgeObjectsForGroup(groupId: string, packId: string): Promise<KnowledgeObject[]> {
+  const { objects, failedTypes, firstError } = await readKnowledgeObjectsForGroup(groupId, packId);
+
+  if (failedTypes.length === KNOWLEDGE_OBJECT_TYPES.length) {
+    throw firstError;
   }
 
-  return sortKnowledgeObjects([functions, pipelines, lookups, routes].flatMap((result) =>
-    result.status === 'fulfilled' ? result.value : [],
-  ));
+  return objects;
+}
+
+/**
+ * Read a pack's contents from one fleet only, reporting which object types failed instead of hiding them.
+ * If nothing can be read from the fleet itself, `fallbackGroupId` (the fleet it inherits from) is tried and recorded.
+ */
+export async function fetchPackKnowledgeInventory(
+  packId: string,
+  groupId: string,
+  fallbackGroupId?: string,
+): Promise<PackKnowledgeInventory> {
+  const resolvedPackId = await resolvePackId(packId);
+  const own = await readKnowledgeObjectsForGroup(groupId, resolvedPackId);
+
+  if (own.failedTypes.length < KNOWLEDGE_OBJECT_TYPES.length) {
+    return { objects: own.objects, failedTypes: own.failedTypes };
+  }
+
+  if (fallbackGroupId && fallbackGroupId !== groupId) {
+    const inherited = await readKnowledgeObjectsForGroup(fallbackGroupId, resolvedPackId);
+
+    if (inherited.failedTypes.length < KNOWLEDGE_OBJECT_TYPES.length) {
+      return { objects: inherited.objects, failedTypes: inherited.failedTypes, readFromGroupId: fallbackGroupId };
+    }
+  }
+
+  throw own.firstError;
 }
 
 export async function fetchPackKnowledgeObjects(packId: string, groupId?: string): Promise<KnowledgeObject[]> {
@@ -1514,19 +1604,28 @@ async function rewritePackLookupFile(lookupUrl: string, lookupId: string, patche
     throw new ApiError(`Only plain .csv lookups can be rewritten from this app; ${lookupId} is not one.`, 400);
   }
 
-  const lookup = getCollectionItems(await handleResponse<unknown>(await fetch(lookupUrl)))[0];
+  const content = applyLookupRowPatches(await fetchPackLookupRaw(lookupUrl), patches);
+  await writePackLookupContent(lookupUrl, lookupId, content);
+}
 
-  if (!lookup) {
-    throw new ApiError(`Lookup ${lookupId} was not found.`, 404);
-  }
-
+async function fetchPackLookupRaw(lookupUrl: string): Promise<string> {
   const rawResponse = await fetch(`${lookupUrl}/content?raw=true`);
 
   if (!rawResponse.ok) {
     await handleResponse<unknown>(rawResponse);
   }
 
-  const content = applyLookupRowPatches(await rawResponse.text(), patches);
+  return rawResponse.text();
+}
+
+/** Replace a lookup's whole file, keeping the lookup's own description, tags, and mode. */
+async function writePackLookupContent(lookupUrl: string, lookupId: string, content: string): Promise<void> {
+  const lookup = getCollectionItems(await handleResponse<unknown>(await fetch(lookupUrl)))[0];
+
+  if (!lookup) {
+    throw new ApiError(`Lookup ${lookupId} was not found.`, 404);
+  }
+
   // Complete representation required; read-only fields (size, modified, version, pendingTask) are left out.
   const body: ApiRecord = { id: lookupId, content };
   for (const key of ['description', 'tags', 'mode'] as const) {
@@ -1536,6 +1635,86 @@ async function rewritePackLookupFile(lookupUrl: string, lookupId: string, patche
   }
 
   await patchJson(lookupUrl, body);
+}
+
+/**
+ * Copy a CSV lookup's whole file from one group to the same lookup in another group. Row ids are not
+ * portable between groups, so the file is copied rather than replaying row edits.
+ */
+export async function copyPackLookupFile(
+  packId: string,
+  lookupId: string,
+  sourceGroupId: string | undefined,
+  targetGroupId: string,
+): Promise<void> {
+  if (!/\.csv$/i.test(lookupId)) {
+    throw new ApiError(`Only plain .csv lookups can be copied from this app; ${lookupId} is not one.`, 400);
+  }
+
+  const path = `/system/lookups/${encodePathSegment(lookupId)}`;
+  const content = await fetchPackLookupRaw(packScopedUrl(packId, path, sourceGroupId));
+
+  await writePackLookupContent(packScopedUrl(packId, path, targetGroupId), lookupId, content);
+}
+
+function withoutBookkeeping(record: ApiRecord): ApiRecord {
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !key.startsWith('__')));
+}
+
+/**
+ * Copy one pipeline definition from a pack in one group to the same pack in another group.
+ * Updates the pipeline when the target already has it, and creates it otherwise.
+ */
+export async function copyPackPipelineBetweenGroups(
+  packId: string,
+  pipelineId: string,
+  sourceGroupId: string,
+  targetGroupId: string,
+  targetHasPipeline: boolean,
+): Promise<void> {
+  const path = `/pipelines/${encodePathSegment(pipelineId)}`;
+  const source = getCollectionItems(await handleResponse<unknown>(await fetch(packScopedUrl(packId, path, sourceGroupId))))[0];
+
+  if (!source) {
+    throw new ApiError(`Pipeline ${pipelineId} was not found in ${sourceGroupId}.`, 404);
+  }
+
+  const definition = { ...withoutBookkeeping(source), id: pipelineId };
+
+  if (targetHasPipeline) {
+    await patchJson(packScopedUrl(packId, path, targetGroupId), definition);
+    return;
+  }
+
+  await handleResponse<unknown>(
+    await fetch(packScopedUrl(packId, '/pipelines', targetGroupId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(definition),
+    }),
+  );
+}
+
+/** Replace every routing table of a pack in the target group with the source group's tables. */
+export async function copyPackRoutesBetweenGroups(packId: string, sourceGroupId: string, targetGroupId: string): Promise<void> {
+  const tables = getCollectionItems(await handleResponse<unknown>(await fetch(packScopedUrl(packId, '/routes', sourceGroupId))));
+
+  if (tables.length === 0) {
+    throw new ApiError(`No routing table was found for pack ${packId} in ${sourceGroupId}.`, 404);
+  }
+
+  for (const table of tables) {
+    const tableId = readString(table.id) ?? 'default';
+    const routes = Array.isArray(table.routes)
+      ? table.routes.map((route) => (isRecord(route) ? withoutBookkeeping(route) : route))
+      : [];
+
+    await patchJson(packScopedUrl(packId, `/routes/${encodePathSegment(tableId)}`, targetGroupId), {
+      ...withoutBookkeeping(table),
+      id: tableId,
+      routes,
+    });
+  }
 }
 
 /** Error message plus any validation details Cribl returned. */

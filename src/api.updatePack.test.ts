@@ -449,6 +449,127 @@ test('commitConfigChanges commits only the given files and deployGroup deploys t
   }
 });
 
+test('installEditedPack with replaceExisting reinstalls the archive over the target pack with force', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ method: string; url: string; body?: string }> = [];
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    calls.push({ method, url: String(input), body: method === 'POST' ? String(init?.body) : undefined });
+
+    if (method === 'PUT') {
+      return new Response(JSON.stringify({ source: 'demo-pack.crbl' }), { status: 200 });
+    }
+
+    return new Response(JSON.stringify({ items: [{ id: 'demo-pack', version: '1.2.9' }] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const result = await api.installEditedPack(
+      'demo-pack',
+      { archive: demoCrbl(), exportMode: 'merge', version: '1.2.7' },
+      {},
+      { groupId: 'target-group', version: '1.2.9', replaceExisting: true },
+    );
+
+    assert.deepEqual(calls.map(({ method, url }) => `${method} ${url}`), [
+      'PUT /api/v1/m/target-group/packs?filename=demo-pack.crbl',
+      'POST /api/v1/m/target-group/packs',
+    ]);
+    assert.deepEqual(JSON.parse(calls[1].body ?? '{}'), {
+      id: 'demo-pack',
+      source: 'demo-pack.crbl',
+      force: true,
+      allowCustomFunctions: true,
+    });
+    assert.equal(result.pack.version, '1.2.9');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('copyPackLookupFile copies the raw source file and keeps the target lookup metadata', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ method: string; url: string; body?: string }> = [];
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    calls.push({ method, url, body: init?.body ? String(init.body) : undefined });
+
+    if (url.endsWith('/content?raw=true')) {
+      return new Response('host,owner\na,b\n', { status: 200 });
+    }
+
+    if (method === 'GET') {
+      return new Response(JSON.stringify({ items: [{ id: 'hosts.csv', description: 'Target copy', mode: 'memory', size: 5 }] }), { status: 200 });
+    }
+
+    return new Response(JSON.stringify({ items: [] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await api.copyPackLookupFile('demo-pack', 'hosts.csv', 'source-group', 'target-group');
+
+    assert.deepEqual(calls.map(({ method, url }) => `${method} ${url}`), [
+      'GET /api/v1/m/source-group/p/demo-pack/system/lookups/hosts.csv/content?raw=true',
+      'GET /api/v1/m/target-group/p/demo-pack/system/lookups/hosts.csv',
+      'PATCH /api/v1/m/target-group/p/demo-pack/system/lookups/hosts.csv',
+    ]);
+    assert.deepEqual(JSON.parse(calls[2].body ?? '{}'), {
+      id: 'hosts.csv',
+      content: 'host,owner\na,b\n',
+      description: 'Target copy',
+      mode: 'memory',
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('copyPackPipelineBetweenGroups and copyPackRoutesBetweenGroups write the source definitions to the target', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ method: string; url: string; body?: string }> = [];
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    calls.push({ method, url, body: init?.body ? String(init.body) : undefined });
+
+    if (method === 'GET' && url.endsWith('/pipelines/main')) {
+      return new Response(JSON.stringify({ items: [{ id: 'main', conf: { functions: [] }, __srcGroup: 'source-group' }] }), { status: 200 });
+    }
+
+    if (method === 'GET' && url.endsWith('/routes')) {
+      return new Response(
+        JSON.stringify({ items: [{ id: 'default', routes: [{ id: 'r1', name: 'Minimal', pipeline: 'main', __internal: 1 }] }] }),
+        { status: 200 },
+      );
+    }
+
+    return new Response(JSON.stringify({ items: [] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await api.copyPackPipelineBetweenGroups('demo-pack', 'main', 'source-group', 'target-group', false);
+    await api.copyPackRoutesBetweenGroups('demo-pack', 'source-group', 'target-group');
+
+    assert.deepEqual(calls.map(({ method, url }) => `${method} ${url}`), [
+      'GET /api/v1/m/source-group/p/demo-pack/pipelines/main',
+      'POST /api/v1/m/target-group/p/demo-pack/pipelines',
+      'GET /api/v1/m/source-group/p/demo-pack/routes',
+      'PATCH /api/v1/m/target-group/p/demo-pack/routes/default',
+    ]);
+    assert.deepEqual(JSON.parse(calls[1].body ?? '{}'), { id: 'main', conf: { functions: [] } });
+    assert.deepEqual(JSON.parse(calls[3].body ?? '{}'), {
+      id: 'default',
+      routes: [{ id: 'r1', name: 'Minimal', pipeline: 'main' }],
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('isReusablePackSource accepts uploaded .crbl source names created by the API', () => {
   assert.equal(isReusablePackSource('cribl_splunk_forwarder_windows_classic_events_to_json.crbl'), true);
   assert.equal(isReusablePackSource('https://example.com/demo.crbl'), true);

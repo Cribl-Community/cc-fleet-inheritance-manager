@@ -20,7 +20,7 @@ policies:
   - object: '/packs/*/export'
     actions: ['GET']
   - object: '/m/:gid/packs'
-    actions: ['GET', 'PUT', 'PATCH']
+    actions: ['GET', 'PUT', 'POST', 'PATCH'] # POST reinstalls a pack over an existing copy (force) when copying contents between fleets
   - object: '/m/:gid/packs/*'
     actions: ['GET', 'PUT', 'PATCH', 'DELETE']
   - object: '/m/:gid/packs/*/export'
@@ -38,8 +38,8 @@ policies:
   - object: '/master/groups/*/deploy'
     actions: ['PATCH']
 
-  # Knowledge objects within packs (PATCH to edit pipelines, routes, and lookup rows)
+  # Knowledge objects within packs (PATCH to edit pipelines, routes, and lookup rows; POST to add a pipeline a fleet is missing)
   - object: '/p/*'
     actions: ['GET', 'PATCH']
   - object: '/m/:gid/p/*'
-    actions: ['GET', 'PATCH']
+    actions: ['GET', 'PATCH', 'POST']
