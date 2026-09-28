@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Modal, Text } from '@capra/core';
+import { Button, IconButton, Modal, SelectField, Text } from '@capra/core';
+import { ArrowLeft, ArrowRight } from '@capra/icons';
 import { useBlocker, type BlockerFunction } from 'react-router-dom';
 import {
   PackExportAssemblyError,
@@ -118,6 +119,42 @@ interface PackPublishResult {
   message: string;
   /** Version this fleet is expected to end up on (installed directly or inherited). */
   expectedVersion?: string;
+}
+
+/** Order an inheritance tree of fleets depth-first (parents before children) and record each fleet's depth. */
+function buildFleetTreeOptions(locations: PackUsageLocation[]): Array<{ location: PackUsageLocation; depth: number }> {
+  const byFleetId = new Map(locations.map((location) => [location.fleetId, location]));
+  const childrenByParent = new Map<string, PackUsageLocation[]>();
+  const roots: PackUsageLocation[] = [];
+
+  for (const location of locations) {
+    const parentId = location.parentFleetId;
+
+    if (parentId && parentId !== location.fleetId && byFleetId.has(parentId)) {
+      childrenByParent.set(parentId, [...(childrenByParent.get(parentId) ?? []), location]);
+    } else {
+      roots.push(location);
+    }
+  }
+
+  const byName = (left: PackUsageLocation, right: PackUsageLocation) => left.fleetName.localeCompare(right.fleetName);
+  const options: Array<{ location: PackUsageLocation; depth: number }> = [];
+  const visited = new Set<string>();
+  const visit = (location: PackUsageLocation, depth: number) => {
+    if (visited.has(location.fleetId)) {
+      return;
+    }
+
+    visited.add(location.fleetId);
+    options.push({ location, depth });
+    [...(childrenByParent.get(location.fleetId) ?? [])].sort(byName).forEach((child) => visit(child, depth + 1));
+  };
+
+  [...roots].sort(byName).forEach((root) => visit(root, 0));
+  // Fleets caught in a parent cycle have no root; list them at the top level.
+  locations.forEach((location) => visit(location, 0));
+
+  return options;
 }
 
 function buildPublishTargets(pack: PackRelationshipSummary | null): PackPublishTarget[] {
@@ -290,6 +327,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
   const [isConfirmingOverwrite, setIsConfirmingOverwrite] = useState(false);
   const [originalConfigGroupIds, setOriginalConfigGroupIds] = useState<string[]>([]);
   const [publishGroupIds, setPublishGroupIds] = useState<string[]>([]);
+  const [highlightedTargetIds, setHighlightedTargetIds] = useState<string[]>([]);
   const [publishResults, setPublishResults] = useState<{ packId: string; items: PackPublishResult[] } | null>(null);
   const [deployPlan, setDeployPlan] = useState<{ packId: string; targets: PackDeployTarget[] } | null>(null);
   const [pendingChanges, setPendingChanges] = useState<PendingPackChanges | null>(null);
@@ -346,6 +384,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       ) ?? visibleUsageLocations[0] ?? null,
     [selectedUsageContextKey, visibleUsageLocations],
   );
+  const fleetTreeOptions = useMemo(() => buildFleetTreeOptions(visibleUsageLocations), [visibleUsageLocations]);
   const selectedGroupId = selectedUsageLocation?.fleetId;
   const selectedPackGroupId = selectedUsageLocation?.inheritedFrom ?? selectedGroupId ?? selectedPack?.groupIds?.[0];
   const publishTargets = useMemo(() => buildPublishTargets(selectedPack), [selectedPack]);
@@ -990,6 +1029,60 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
 
   const isPackBusy = selectedPack ? updatingPackId === selectedPack.id : false;
 
+  const availableTargets = publishTargets.filter((target) => !publishGroupIds.includes(target.groupId));
+  const chosenTargets = publishTargets.filter((target) => publishGroupIds.includes(target.groupId));
+  const highlightedAvailableIds = availableTargets
+    .map((target) => target.groupId)
+    .filter((groupId) => highlightedTargetIds.includes(groupId));
+  const highlightedChosenIds = chosenTargets
+    .map((target) => target.groupId)
+    .filter((groupId) => highlightedTargetIds.includes(groupId));
+  const moveTargets = (groupIds: string[], direction: 'add' | 'remove') => {
+    setPublishTargetSelection(
+      direction === 'add'
+        ? [...publishGroupIds, ...groupIds.filter((groupId) => !publishGroupIds.includes(groupId))]
+        : publishGroupIds.filter((groupId) => !groupIds.includes(groupId)),
+    );
+    setHighlightedTargetIds((current) => current.filter((groupId) => !groupIds.includes(groupId)));
+  };
+  const renderTransferItem = (target: PackPublishTarget, isChosen: boolean) => {
+    const isHighlighted = highlightedTargetIds.includes(target.groupId);
+    const usesOriginalConfig = originalConfigGroupIds.includes(target.groupId);
+
+    return (
+      <li key={target.groupId}>
+        <button
+          type="button"
+          className={`fleet-transfer-item${isHighlighted ? ' fleet-transfer-item-highlighted' : ''}`}
+          aria-pressed={isHighlighted}
+          onClick={() =>
+            setHighlightedTargetIds((current) =>
+              current.includes(target.groupId)
+                ? current.filter((groupId) => groupId !== target.groupId)
+                : [...current, target.groupId],
+            )
+          }
+          onDoubleClick={() => moveTargets([target.groupId], isChosen ? 'remove' : 'add')}
+        >
+          <span className="list-card-header">
+            <Text variant="body-sm-semibold">{target.label}</Text>
+            {target.product ? <FleetProductBadge product={target.product} /> : null}
+          </span>
+          <Text variant="body-xs-normal" color="secondary">
+            {isChosen
+              ? `${target.version ?? 'Unknown version'} → ${target.parentGroupId ? `${plannedVersion} (via ${target.parentLabel})` : plannedVersion}`
+              : target.version ?? 'Unknown version'}
+            {isChosen && target.inheritingFleets.length > 0
+              ? ` · Also inherited by: ${target.inheritingFleets.map((child) => child.label).join(', ')}`
+              : ''}
+            {target.parentLabel ? ` · Inherits from ${target.parentLabel}` : ''}
+            {isChosen && usesOriginalConfig ? ' · Will publish from original configuration (local modifications discarded)' : ''}
+          </Text>
+        </button>
+      </li>
+    );
+  };
+
   const editForm = selectedPack && isEditingPack && packDraft ? (
     <div className="detail-section" style={{ marginTop: '1rem' }}>
       <Text as="h3" variant="heading-sm">
@@ -1002,57 +1095,80 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               Fleets to update ({publishGroupIds.length} of {publishTargets.length} selected)
             </Text>
           </legend>
-          <div className="pill-row" style={{ marginTop: 0 }}>
-            <button
-              type="button"
-              className="pill pill-subtle"
-              onClick={() => setPublishTargetSelection(publishTargets.map((target) => target.groupId))}
-            >
-              Select all
-            </button>
-            <button type="button" className="pill pill-subtle" onClick={() => setPublishTargetSelection([])}>
-              Clear
-            </button>
-          </div>
           {publishTargets.length === 0 ? (
             <Text variant="body-xs-normal" color="secondary">
               No fleets with this pack installed were found.
             </Text>
           ) : (
-            publishTargets.map((target) => {
-              const isChecked = publishGroupIds.includes(target.groupId);
-              const usesOriginalConfig = originalConfigGroupIds.includes(target.groupId);
-
-              return (
-                <label key={target.groupId} className="publish-target">
-                  <input
-                    type="checkbox"
-                    checked={isChecked}
-                    onChange={() =>
-                      setPublishTargetSelection(
-                        isChecked
-                          ? publishGroupIds.filter((groupId) => groupId !== target.groupId)
-                          : [...publishGroupIds, target.groupId],
-                      )
-                    }
+            <>
+              <Text variant="body-xs-normal" color="secondary">
+                Click fleets to highlight them, then use the arrows to move them. Double-click moves a fleet directly.
+              </Text>
+              <div className="fleet-transfer">
+                <div className="fleet-transfer-list">
+                  <Text variant="body-xs-semibold" color="secondary">
+                    Available ({availableTargets.length})
+                  </Text>
+                  <ul className="fleet-transfer-items" aria-label="Available fleets">
+                    {availableTargets.length > 0 ? (
+                      availableTargets.map((target) => renderTransferItem(target, false))
+                    ) : (
+                      <li className="fleet-transfer-empty">
+                        <Text variant="body-xs-normal" color="secondary">
+                          All fleets are selected.
+                        </Text>
+                      </li>
+                    )}
+                  </ul>
+                </div>
+                <div className="fleet-transfer-controls">
+                  <IconButton
+                    icon={ArrowRight}
+                    aria-label={`Add ${highlightedAvailableIds.length || ''} highlighted fleet${highlightedAvailableIds.length === 1 ? '' : 's'} to the update`}
+                    onClick={() => moveTargets(highlightedAvailableIds, 'add')}
+                    disabled={isPackBusy || highlightedAvailableIds.length === 0}
                   />
-                  <span className="publish-target-body">
-                    <span className="list-card-header">
-                      <Text variant="body-sm-semibold">{target.label}</Text>
-                      {target.product ? <FleetProductBadge product={target.product} /> : null}
-                    </span>
-                    <Text variant="body-xs-normal" color="secondary">
-                      {`${target.version ?? 'Unknown version'} → ${target.parentGroupId ? `${plannedVersion} (via ${target.parentLabel})` : plannedVersion}`}
-                      {target.inheritingFleets.length > 0
-                        ? ` · Also inherited by: ${target.inheritingFleets.map((child) => child.label).join(', ')}`
-                        : ''}
-                      {target.parentLabel ? ` · Inherits from ${target.parentLabel}` : ''}
-                      {usesOriginalConfig ? ' · Will publish from original configuration (local modifications discarded)' : ''}
-                    </Text>
-                  </span>
-                </label>
-              );
-            })
+                  <IconButton
+                    icon={ArrowLeft}
+                    aria-label={`Remove ${highlightedChosenIds.length || ''} highlighted fleet${highlightedChosenIds.length === 1 ? '' : 's'} from the update`}
+                    onClick={() => moveTargets(highlightedChosenIds, 'remove')}
+                    disabled={isPackBusy || highlightedChosenIds.length === 0}
+                  />
+                  <button
+                    type="button"
+                    className="pill pill-subtle"
+                    onClick={() => moveTargets(publishTargets.map((target) => target.groupId), 'add')}
+                    disabled={availableTargets.length === 0}
+                  >
+                    Add all
+                  </button>
+                  <button
+                    type="button"
+                    className="pill pill-subtle"
+                    onClick={() => moveTargets(publishGroupIds, 'remove')}
+                    disabled={chosenTargets.length === 0}
+                  >
+                    Remove all
+                  </button>
+                </div>
+                <div className="fleet-transfer-list">
+                  <Text variant="body-xs-semibold" color="secondary">
+                    Fleets to update ({chosenTargets.length})
+                  </Text>
+                  <ul className="fleet-transfer-items" aria-label="Fleets to update">
+                    {chosenTargets.length > 0 ? (
+                      chosenTargets.map((target) => renderTransferItem(target, true))
+                    ) : (
+                      <li className="fleet-transfer-empty">
+                        <Text variant="body-xs-normal" color="secondary">
+                          No fleets selected.
+                        </Text>
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              </div>
+            </>
           )}
         </fieldset>
         <label className="metadata-row">
@@ -1145,7 +1261,26 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       ]
     : [];
 
+  const fleetProducts = [...new Set(fleetTreeOptions.map((option) => option.location.product))];
+  const renderFleetOption = ({ location, depth }: { location: PackUsageLocation; depth: number }) => (
+    <SelectField.Item
+      key={`${location.product}:${location.fleetId}`}
+      id={`${location.product}:${location.fleetId}`}
+      textValue={location.fleetName}
+    >
+      <span className="fleet-tree-option" style={{ paddingInlineStart: `${depth * 1.25}rem` }}>
+        {depth > 0 ? (
+          <span className="fleet-tree-branch" aria-hidden="true">
+            └
+          </span>
+        ) : null}
+        {location.fleetName}
+      </span>
+    </SelectField.Item>
+  );
+
   const actionBanner = selectedPack ? (
+    <>
     <div
       className={`pack-action-banner${bannerStatus.some((status) => status.tone !== 'subtle') ? ' pack-action-banner-pending' : ''}`}
       role="region"
@@ -1154,6 +1289,33 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       <div className="pack-action-banner-row">
         <div className="pack-action-banner-summary">
           <Text variant="body-md-semibold">{selectedPack.displayName || selectedPack.id}</Text>
+          {visibleUsageLocations.length > 0 ? (
+            <div className="pack-action-banner-fleet">
+              <SelectField
+                label="Viewing fleet"
+                layout="horizontal"
+                size="sm"
+                value={selectedUsageContextKey}
+                onChange={(key) => {
+                  if (key !== null) {
+                    setSelectedUsageContextKey(String(key));
+                  }
+                }}
+                disabled={hasUnsavedDraft || isBusy}
+                helperText={hasUnsavedDraft ? 'Save or cancel your edits to switch fleets.' : undefined}
+                canSearch={visibleUsageLocations.length > 8}
+              >
+                {fleetProducts.length > 1
+                  ? fleetProducts.map((product) => (
+                      <SelectField.Section key={product}>
+                        <SelectField.Header label={product === 'edge' ? 'Edge' : 'Stream'} />
+                        {fleetTreeOptions.filter((option) => option.location.product === product).map(renderFleetOption)}
+                      </SelectField.Section>
+                    ))
+                  : fleetTreeOptions.map(renderFleetOption)}
+              </SelectField>
+            </div>
+          ) : null}
           <div className="pill-row pack-action-banner-status">
             {bannerStatus.length > 0 ? (
               bannerStatus.map((status) => (
@@ -1168,9 +1330,6 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               <span className="pill pill-subtle">No pending changes</span>
             )}
           </div>
-          <Text variant="body-xs-normal" color="secondary">
-            Commit &amp; deploy targets: {deployTargets.map((target) => target.label).join(', ') || 'no fleets'}
-          </Text>
         </div>
         <div className="pack-action-banner-actions">
           {isEditingPack ? (
@@ -1204,6 +1363,11 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
           ) : null}
         </div>
       </div>
+    </div>
+    <div className="pack-action-details">
+      <Text variant="body-xs-normal" color="secondary">
+        Commit &amp; deploy targets: {deployTargets.map((target) => target.label).join(', ') || 'no fleets'}
+      </Text>
       {updatePackMessage ? (
         <div className="pack-action-banner-message" role="status" aria-live="polite">
           <Text variant="body-xs-normal" color="secondary">
@@ -1229,6 +1393,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
         </ul>
       ) : null}
     </div>
+    </>
   ) : null;
 
   return (
@@ -1470,6 +1635,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                       You are viewing the pack as deployed in {selectedUsageLocation.fleetName}. Pack content can differ across fleets even when the version matches.
                     </Text>
                   </div>
+                  {!isActionBarLayout ? (
                   <div className="pill-row" style={{ marginTop: '0.75rem' }}>
                     {visibleUsageLocations.map((usageLocation) => {
                       const usageKey = `${usageLocation.product}:${usageLocation.fleetId}`;
@@ -1488,6 +1654,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                       );
                     })}
                   </div>
+                  ) : null}
 
                   <div className="metadata-grid" style={{ marginTop: '1rem' }}>
                     <div className="metadata-row">

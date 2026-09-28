@@ -283,6 +283,81 @@ body {
   gap: 0.2rem;
 }
 
+.fleet-transfer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: stretch;
+}
+
+.fleet-transfer-list {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.fleet-transfer-items {
+  display: grid;
+  align-content: start;
+  gap: 0.35rem;
+  min-height: 8rem;
+  max-height: 18rem;
+  margin: 0;
+  padding: 0.5rem;
+  overflow-y: auto;
+  border: 1px solid var(--ds-border-neutral);
+  border-radius: 0.625rem;
+  background: var(--ds-background);
+  list-style: none;
+}
+
+.fleet-transfer-item {
+  display: grid;
+  gap: 0.2rem;
+  width: 100%;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  user-select: none;
+}
+
+.fleet-transfer-item:hover {
+  background: var(--ds-background-neutral);
+}
+
+.fleet-transfer-item-highlighted {
+  border-color: var(--ds-accent);
+  box-shadow: inset 0 0 0 1px var(--ds-accent);
+}
+
+.fleet-transfer-empty {
+  padding: 0.5rem 0.625rem;
+}
+
+.fleet-transfer-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+@media (max-width: 720px) {
+  .fleet-transfer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fleet-transfer-controls {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+
 .publish-results {
   display: grid;
   gap: 0.5rem;
@@ -657,20 +732,26 @@ body {
   color: var(--ds-text-danger);
 }
 
+/* Compact sticky action row. Negative top offsets .app-main's 2rem padding so nothing
+   shows above it; negative side margins span the panel's 1.5rem padding. */
 .pack-action-banner {
   position: sticky;
-  top: 0;
+  top: -2rem;
   z-index: 5;
-  margin-bottom: 1rem;
-  padding: 0.875rem 1rem;
-  border: 1px solid var(--ds-border-neutral);
-  border-radius: 0.75rem;
-  background: var(--ds-background);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+  margin: 0 -1.5rem 0.75rem;
+  padding: 0.75rem 1.5rem;
+  border-top: 1px solid var(--ds-border-neutral);
+  border-bottom: 1px solid var(--ds-border-neutral);
+  background: var(--ds-background-elevated);
+  box-shadow: 0 8px 12px -8px rgba(0, 0, 0, 0.18);
 }
 
 .pack-action-banner-pending {
-  border-color: var(--ds-accent);
+  border-bottom: 2px solid var(--ds-accent);
+}
+
+.pack-action-details {
+  margin-bottom: 1rem;
 }
 
 .pack-action-banner-row {
@@ -689,6 +770,21 @@ body {
 
 .pack-action-banner-status {
   margin-top: 0;
+}
+
+.pack-action-banner-fleet {
+  width: min(22rem, 100%);
+}
+
+.fleet-tree-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.fleet-tree-branch {
+  color: var(--ds-text-secondary, currentColor);
+  opacity: 0.6;
 }
 
 .pack-action-banner-actions {
