@@ -94,6 +94,57 @@ test('exportPack throws PackExportAssemblyError on the package.json ENOENT failu
   }
 });
 
+test('exportPack treats ENOENT inside the .tmp export folder (inheriting child fleet) as PackExportAssemblyError', async () => {
+  const originalFetch = globalThis.fetch;
+  const tmpDefaultError = JSON.stringify({
+    status: 'error',
+    message:
+      "ENOENT: no such file or directory, rename '/opt/cribl_config/groups/child/default/demo-pack' -> '/opt/cribl_config/state/packs/demo-pack.bHx4a0O.tmp/default'",
+  });
+
+  globalThis.fetch = (async () => new Response(tmpDefaultError, { status: 500 })) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => api.exportPack('demo-pack', 'merge', 'demo-pack.crbl', 'child'),
+      api.PackExportAssemblyError,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('publishPackEdits installs an explicit shared version instead of bumping the exported one', async () => {
+  const originalFetch = globalThis.fetch;
+  let uploadedArchive: Uint8Array | undefined;
+
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+
+    if (method === 'GET') {
+      return new Response(demoCrbl(), { status: 200 });
+    }
+
+    if (method === 'PUT') {
+      uploadedArchive = await readBody(init);
+      return new Response(JSON.stringify({ source: 'demo-pack.crbl' }), { status: 200 });
+    }
+
+    return new Response(JSON.stringify({ id: 'demo-pack', version: '1.2.12' }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const result = await api.publishPackEdits('demo-pack', { description: 'x' }, { groupId: 'demo-group', version: '1.2.12' });
+
+    assert.ok(uploadedArchive);
+    assert.equal(JSON.parse(extractCrbl(uploadedArchive)['package.json']).version, '1.2.12');
+    assert.equal(result.previousVersion, '1.2.7');
+    assert.equal(result.newVersion, '1.2.12');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('publishPackEdits exports, rewrites package.json, uploads to the group, and upgrades to the new version', async () => {
   const originalFetch = globalThis.fetch;
   const calls: Array<{ method: string; url: string; init?: RequestInit }> = [];
@@ -318,6 +369,81 @@ test('updatePack falls back to the root pack endpoint when the group-scoped over
     assert.equal(String(calls[0].input), '/api/v1/m/demo-group/packs/demo-pack');
     assert.equal(String(calls[1].input), '/api/v1/packs/demo-pack');
     assert.equal(calls[1].init?.method, 'PATCH');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchPendingPackChanges separates this pack\'s files from other pending changes in the same groups', async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        count: 1,
+        items: [
+          {
+            files: [
+              { path: 'groups/parentfleet/default/demo-pack/package.json', index: ' ', working_dir: 'M' },
+              { path: 'groups/parentfleet/local/cribl/pipelines/other/conf.yml', index: ' ', working_dir: 'M' },
+              { path: 'groups/unrelated/default/demo-pack/package.json', index: ' ', working_dir: 'M' },
+            ],
+            not_added: ['groups/parentfleet/default/demo-pack/default/pipelines/main/conf.yml'],
+            created: [],
+            deleted: [],
+            modified: [],
+            staged: [],
+            renamed: [],
+            conflicted: [],
+          },
+        ],
+      }),
+      { status: 200 },
+    )) as typeof fetch;
+
+  try {
+    const pending = await api.fetchPendingPackChanges('demo-pack', ['parentfleet', 'child_fleet2']);
+
+    assert.deepEqual(pending.packFiles, [
+      'groups/parentfleet/default/demo-pack/default/pipelines/main/conf.yml',
+      'groups/parentfleet/default/demo-pack/package.json',
+    ]);
+    assert.deepEqual(pending.otherFiles, ['groups/parentfleet/local/cribl/pipelines/other/conf.yml']);
+    assert.deepEqual(pending.conflictedFiles, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('commitConfigChanges commits only the given files and deployGroup deploys that commit', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ method: init?.method ?? 'GET', url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+
+    if (url.endsWith('/version/commit')) {
+      return new Response(JSON.stringify({ count: 1, items: [{ commit: 'abc1234def', branch: 'main', summary: {} }] }), { status: 200 });
+    }
+
+    return new Response(JSON.stringify({ count: 1, items: [{ id: 'child_fleet2', configVersion: 'abc1234def' }] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const commit = await api.commitConfigChanges('Update pack demo-pack', ['groups/parentfleet/default/demo-pack/package.json']);
+    const configVersion = await api.deployGroup('child_fleet2', commit, 'edge');
+
+    assert.equal(commit, 'abc1234def');
+    assert.equal(configVersion, 'abc1234def');
+    assert.deepEqual(calls, [
+      {
+        method: 'POST',
+        url: '/api/v1/version/commit',
+        body: { message: 'Update pack demo-pack', files: ['groups/parentfleet/default/demo-pack/package.json'] },
+      },
+      { method: 'PATCH', url: '/api/v1/products/edge/groups/child_fleet2/deploy', body: { version: 'abc1234def' } },
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }

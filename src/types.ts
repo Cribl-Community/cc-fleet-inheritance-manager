@@ -43,6 +43,7 @@ export interface PackUsageLocation {
   product: FleetProduct;
   status?: Pack['status'];
   inheritedFrom?: string;
+  parentFleetId?: string;
   configDrift?: boolean;
   version?: string;
 }

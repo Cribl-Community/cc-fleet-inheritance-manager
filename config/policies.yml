@@ -26,6 +26,18 @@ policies:
   - object: '/m/:gid/packs/*/export'
     actions: ['GET']
 
+  # Commit and deploy published pack changes
+  - object: '/version/status'
+    actions: ['GET']
+  - object: '/version/commit'
+    actions: ['POST']
+  - object: '/products/stream/groups/*/deploy'
+    actions: ['PATCH']
+  - object: '/products/edge/groups/*/deploy'
+    actions: ['PATCH']
+  - object: '/master/groups/*/deploy'
+    actions: ['PATCH']
+
   # Knowledge objects within packs
   - object: '/p/*'
     actions: ['GET']

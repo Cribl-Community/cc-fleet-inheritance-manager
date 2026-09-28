@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Text } from '@capra/core';
-import { PackExportAssemblyError, publishPackEdits } from '../api';
-import { bumpPatchVersion, type PackMetadataEdits } from '../packArchive';
+import {
+  PackExportAssemblyError,
+  commitConfigChanges,
+  deployGroup,
+  exportPackForEditing,
+  fetchGroupPack,
+  fetchPendingPackChanges,
+  installEditedPack,
+  type ExportedPackArchive,
+  type PendingPackChanges,
+} from '../api';
+import { nextSharedVersion, type PackMetadataEdits } from '../packArchive';
 import type { FleetProduct, KnowledgeObject, Pack, PackReference, PackRelationshipSummary, PackUsageLocation } from '../types';
 import { FleetProductBadge } from './FleetProductBadge';
 import {
@@ -40,7 +50,59 @@ interface PackPublishTarget {
   label: string;
   product?: FleetProduct;
   version?: string;
-  inheritingFleets: string[];
+  inheritingFleets: PackDeployTarget[];
+  /** Parent fleet target this fleet inherits the pack from, when the fleet hierarchy shows one. */
+  parentGroupId?: string;
+  parentLabel?: string;
+}
+
+/** A fleet a commit is deployed to. */
+interface PackDeployTarget {
+  groupId: string;
+  label: string;
+  product?: FleetProduct;
+  parentGroupId?: string;
+}
+
+function buildDeployTargets(targets: PackPublishTarget[]): PackDeployTarget[] {
+  const deployTargets = new Map<string, PackDeployTarget>();
+
+  for (const target of targets) {
+    deployTargets.set(target.groupId, {
+      groupId: target.groupId,
+      label: target.label,
+      product: target.product,
+      parentGroupId: target.parentGroupId,
+    });
+  }
+
+  for (const target of targets) {
+    for (const child of target.inheritingFleets) {
+      if (!deployTargets.has(child.groupId)) {
+        deployTargets.set(child.groupId, child);
+      }
+    }
+  }
+
+  // Parents deploy before the child fleets that inherit from them.
+  return [...deployTargets.values()].sort((left, right) => Number(Boolean(left.parentGroupId)) - Number(Boolean(right.parentGroupId)));
+}
+
+function PublishResultList({ items, label, successLabel }: { items: PackPublishResult[]; label: string; successLabel: string }) {
+  return (
+    <ul className="publish-results" aria-label={label}>
+      {items.map((item) => (
+        <li key={item.groupId} className={`publish-result publish-result-${item.tone}`}>
+          <Text variant="body-xs-semibold">
+            {item.tone === 'success' ? successLabel : item.tone === 'warning' ? 'Check' : 'Failed'}: {item.label}
+          </Text>
+          <Text variant="body-xs-normal" color="secondary">
+            {item.message}
+          </Text>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 interface PackPublishResult {
@@ -48,6 +110,8 @@ interface PackPublishResult {
   label: string;
   tone: 'success' | 'warning' | 'error';
   message: string;
+  /** Version this fleet is expected to end up on (installed directly or inherited). */
+  expectedVersion?: string;
 }
 
 function buildPublishTargets(pack: PackRelationshipSummary | null): PackPublishTarget[] {
@@ -69,7 +133,12 @@ function buildPublishTargets(pack: PackRelationshipSummary | null): PackPublishT
     };
 
     if (location.fleetId !== groupId) {
-      target.inheritingFleets.push(location.fleetName);
+      target.inheritingFleets.push({
+        groupId: location.fleetId,
+        label: location.fleetName,
+        product: location.product,
+        parentGroupId: groupId,
+      });
     }
 
     targets.set(groupId, target);
@@ -81,16 +150,53 @@ function buildPublishTargets(pack: PackRelationshipSummary | null): PackPublishT
     }
   }
 
+  for (const target of targets.values()) {
+    const owner = pack.usageLocations.find((location) => location.fleetId === target.groupId);
+    const parentLocation = owner?.parentFleetId
+      ? pack.usageLocations.find((location) => location.fleetId === owner.parentFleetId)
+      : undefined;
+    const parentGroupId = parentLocation ? parentLocation.inheritedFrom ?? parentLocation.fleetId : undefined;
+
+    if (parentGroupId && parentGroupId !== target.groupId && targets.has(parentGroupId)) {
+      target.parentGroupId = parentGroupId;
+      target.parentLabel = targets.get(parentGroupId)?.label ?? parentGroupId;
+    }
+  }
+
   return [...targets.values()].sort((left, right) => left.label.localeCompare(right.label));
 }
 
-function describeNextVersion(version: string | undefined): string {
+/** Order targets so parent fleets publish before the child fleets that inherit from them. */
+function orderParentsFirst(targets: PackPublishTarget[], allTargets: PackPublishTarget[]): PackPublishTarget[] {
+  const byGroupId = new Map(allTargets.map((target) => [target.groupId, target]));
+  const depth = (target: PackPublishTarget): number => {
+    let level = 0;
+    const seen = new Set<string>();
+    let parentId = target.parentGroupId;
+
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      level += 1;
+      parentId = byGroupId.get(parentId)?.parentGroupId;
+    }
+
+    return level;
+  };
+
+  return [...targets].sort((left, right) => depth(left) - depth(right));
+}
+
+function describeSharedVersion(versions: Array<string | undefined>): string {
   try {
-    return bumpPatchVersion(version);
+    return nextSharedVersion(versions);
   } catch {
-    // The exported package.json version is authoritative; it is checked during publish.
-    return 'next patch version';
+    // The exported package.json versions are authoritative; they are checked during publish.
+    return 'next version';
   }
+}
+
+function knownPackVersions(pack: PackRelationshipSummary | null): Array<string | undefined> {
+  return pack ? [pack.version, ...pack.usageLocations.map((location) => location.version)] : [];
 }
 
 const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
@@ -172,6 +278,12 @@ export function PacksView() {
   const [originalConfigGroupIds, setOriginalConfigGroupIds] = useState<string[]>([]);
   const [publishGroupIds, setPublishGroupIds] = useState<string[]>([]);
   const [publishResults, setPublishResults] = useState<{ packId: string; items: PackPublishResult[] } | null>(null);
+  const [deployPlan, setDeployPlan] = useState<{ packId: string; targets: PackDeployTarget[] } | null>(null);
+  const [pendingChanges, setPendingChanges] = useState<PendingPackChanges | null>(null);
+  const [isConfirmingDeploy, setIsConfirmingDeploy] = useState(false);
+  const [isDeploying, setIsDeploying] = useState(false);
+  const [deployMessage, setDeployMessage] = useState<{ packId: string; text: string } | null>(null);
+  const [deployResults, setDeployResults] = useState<{ packId: string; items: PackPublishResult[] } | null>(null);
   const [packDraft, setPackDraft] = useState<PackDraft | null>(null);
 
   const filteredPacks = useMemo(() => {
@@ -220,6 +332,7 @@ export function PacksView() {
   const selectedGroupId = selectedUsageLocation?.fleetId;
   const selectedPackGroupId = selectedUsageLocation?.inheritedFrom ?? selectedGroupId ?? selectedPack?.groupIds?.[0];
   const publishTargets = useMemo(() => buildPublishTargets(selectedPack), [selectedPack]);
+  const plannedVersion = useMemo(() => describeSharedVersion(knownPackVersions(selectedPack)), [selectedPack]);
   const {
     data: knowledgeObjects,
     loading: koLoading,
@@ -311,6 +424,8 @@ export function PacksView() {
     setIsConfirmingOverwrite(false);
     setOriginalConfigGroupIds([]);
     setPublishGroupIds([]);
+    setIsConfirmingDeploy(false);
+    setPendingChanges(null);
 
     if (visibleUsageLocations.length === 0) {
       setSelectedUsageContextKey(null);
@@ -376,7 +491,10 @@ export function PacksView() {
       return;
     }
 
-    const targets = publishTargets.filter((target) => publishGroupIds.includes(target.groupId));
+    const targets = orderParentsFirst(
+      publishTargets.filter((target) => publishGroupIds.includes(target.groupId)),
+      publishTargets,
+    );
 
     if (targets.length === 0) {
       setUpdatePackMessage('Select at least one fleet to update.');
@@ -384,15 +502,17 @@ export function PacksView() {
     }
 
     if (!isConfirmingOverwrite) {
-      const targetSummary = targets
-        .map((target) => `${target.label} → ${describeNextVersion(target.version ?? selectedPack.version)}`)
-        .join('; ');
+      const targetSummary = targets.map((target) => `${target.label} (${target.version ?? 'unknown'})`).join('; ');
       const discardsLocalChanges = targets.some((target) => originalConfigGroupIds.includes(target.groupId));
+      const childrenWithoutParent = targets.filter(
+        (target) => target.parentGroupId && !publishGroupIds.includes(target.parentGroupId),
+      );
 
       setIsConfirmingOverwrite(true);
       setUpdatePackMessage(
-        `This will replace "${packLabel}" in ${targets.length} fleet${targets.length === 1 ? '' : 's'} (${targetSummary}), changing: ${changedFields.join(', ')}. ` +
+        `This will replace "${packLabel}" in ${targets.length} fleet${targets.length === 1 ? '' : 's'} (${targetSummary}) and set all of them to version ${plannedVersion}, the next version after the latest one any fleet reports. Changing: ${changedFields.join(', ')}. ` +
           `${discardsLocalChanges ? 'Fleets marked "original configuration" will lose local modifications to this pack. ' : ''}` +
+          `${childrenWithoutParent.length > 0 ? `${childrenWithoutParent.map((target) => `${target.label} inherits from ${target.parentLabel}`).join('; ')}, so if it has no copy of its own it is only updated by also selecting its parent. ` : ''}` +
           'This cannot be undone. Click Confirm overwrite to continue.',
       );
       return;
@@ -403,57 +523,149 @@ export function PacksView() {
 
     const items: PackPublishResult[] = [];
     const needsOriginalConfig: string[] = [];
+    const exportedByGroup = new Map<string, ExportedPackArchive>();
+    const inheritingTargets: PackPublishTarget[] = [];
+    const progress = (target: PackPublishTarget, step: string) =>
+      setUpdatePackMessage(`[${targets.indexOf(target) + 1}/${targets.length}] ${target.label}: ${step}`);
+    const fail = (target: PackPublishTarget, message: string) =>
+      items.push({ groupId: target.groupId, label: target.label, tone: 'error', message });
 
-    for (const [index, target] of targets.entries()) {
-      const prefix = `[${index + 1}/${targets.length}] ${target.label}: `;
+    // Phase 1: export every selected fleet, so the new version can be chosen from what Cribl actually has installed.
+    for (const target of targets) {
+      try {
+        exportedByGroup.set(
+          target.groupId,
+          await exportPackForEditing(selectedPack.id, {
+            groupId: target.groupId,
+            allowOriginalConfigExport: originalConfigGroupIds.includes(target.groupId),
+            onProgress: (step) => progress(target, step),
+          }),
+        );
+      } catch (error) {
+        if (error instanceof PackExportAssemblyError && target.parentGroupId) {
+          // No standalone copy of the pack in this fleet to export; it inherits the pack from its parent.
+          inheritingTargets.push(target);
+        } else if (error instanceof PackExportAssemblyError) {
+          needsOriginalConfig.push(target.groupId);
+          fail(
+            target,
+            `${error.message} You can publish this fleet from the original pack configuration instead, but that discards its local modifications to this pack. Click Publish again to review that option.`,
+          );
+        } else {
+          fail(target, error instanceof Error ? error.message : 'Export failed.');
+        }
+      }
+    }
+
+    // Phase 2: one shared version for every fleet, the next after the latest version known anywhere.
+    let sharedVersion: string | undefined;
+    try {
+      sharedVersion = nextSharedVersion([
+        ...knownPackVersions(selectedPack),
+        ...[...exportedByGroup.values()].map((exported) => exported.version),
+      ]);
+    } catch (error) {
+      for (const target of targets) {
+        if (exportedByGroup.has(target.groupId)) {
+          fail(target, error instanceof Error ? error.message : 'Could not choose a version.');
+        }
+      }
+      exportedByGroup.clear();
+    }
+
+    // Phase 3: install that version in each exported fleet, parents first.
+    for (const target of targets) {
+      const exported = exportedByGroup.get(target.groupId);
+
+      if (!exported || !sharedVersion) {
+        continue;
+      }
 
       try {
-        const result = await publishPackEdits(selectedPack.id, packEdits, {
+        const result = await installEditedPack(selectedPack.id, exported, packEdits, {
           groupId: target.groupId,
-          allowOriginalConfigExport: originalConfigGroupIds.includes(target.groupId),
-          onProgress: (step) => setUpdatePackMessage(prefix + step),
+          version: sharedVersion,
+          onProgress: (step) => progress(target, step),
         });
         const installedVersion = result.pack.version;
 
         items.push(
-          installedVersion === result.newVersion
+          installedVersion === sharedVersion
             ? {
                 groupId: target.groupId,
                 label: target.label,
                 tone: 'success',
                 message: [`Cribl now reports version ${installedVersion} (was ${result.previousVersion}).`, ...result.warnings].join(' '),
+                expectedVersion: sharedVersion,
               }
             : {
                 groupId: target.groupId,
                 label: target.label,
                 tone: 'warning',
-                message: `Upload finished, but Cribl reports version ${installedVersion ?? 'unknown'} instead of ${result.newVersion}. Check the pack in Cribl before relying on this change.`,
+                message: `Upload finished, but Cribl reports version ${installedVersion ?? 'unknown'} instead of ${sharedVersion}. Check the pack in Cribl before relying on this change.`,
               },
         );
       } catch (error) {
-        if (error instanceof PackExportAssemblyError) {
-          needsOriginalConfig.push(target.groupId);
-          items.push({
-            groupId: target.groupId,
-            label: target.label,
-            tone: 'error',
-            message: `${error.message} You can publish this fleet from the original pack configuration instead, but that discards its local modifications to this pack. Click Publish again to review that option.`,
-          });
-        } else {
-          items.push({
-            groupId: target.groupId,
-            label: target.label,
-            tone: 'error',
-            message: error instanceof Error ? error.message : 'Publish failed.',
-          });
-        }
+        fail(target, error instanceof Error ? error.message : 'Publish failed.');
       }
 
       setPublishResults({ packId: selectedPack.id, items: [...items] });
     }
 
+    // Phase 4: fleets that inherit the pack are updated through their parent.
+    for (const target of inheritingTargets) {
+      const parentLabel = target.parentLabel ?? target.parentGroupId;
+      const parentResult = items.find((item) => item.groupId === target.parentGroupId && item.expectedVersion);
+      let currentVersion: string | undefined;
+
+      try {
+        progress(target, `Checking the version inherited from ${parentLabel}…`);
+        currentVersion = (await fetchGroupPack(selectedPack.id, target.groupId)).version;
+      } catch {
+        currentVersion = undefined;
+      }
+
+      if (!parentResult) {
+        fail(
+          target,
+          `This fleet has no copy of the pack of its own to overwrite; it inherits it from ${parentLabel} (currently version ${currentVersion ?? 'unknown'}). Select ${parentLabel} as well to update it.`,
+        );
+      } else if (currentVersion === parentResult.expectedVersion) {
+        items.push({
+          groupId: target.groupId,
+          label: target.label,
+          tone: 'success',
+          message: `Updated through inheritance from ${parentLabel}: this fleet now reports version ${currentVersion}.`,
+          expectedVersion: currentVersion,
+        });
+      } else {
+        items.push({
+          groupId: target.groupId,
+          label: target.label,
+          tone: 'warning',
+          message: `This fleet inherits the pack from ${parentLabel} and still reports version ${currentVersion ?? 'unknown'}. It should pick up version ${parentResult.expectedVersion} after Commit & deploy.`,
+          expectedVersion: parentResult.expectedVersion,
+        });
+      }
+    }
+
+    items.sort((left, right) => targets.findIndex((t) => t.groupId === left.groupId) - targets.findIndex((t) => t.groupId === right.groupId));
+    setPublishResults({ packId: selectedPack.id, items: [...items] });
+
     const failedGroupIds = items.filter((item) => item.tone === 'error').map((item) => item.groupId);
     const publishedCount = items.length - failedGroupIds.length;
+    const publishedTargets = publishTargets.filter((target) =>
+      items.some((item) => item.groupId === target.groupId && item.tone !== 'error'),
+    );
+
+    if (publishedTargets.length > 0) {
+      setDeployPlan({ packId: selectedPack.id, targets: buildDeployTargets(publishedTargets) });
+      setDeployResults(null);
+      setDeployMessage({
+        packId: selectedPack.id,
+        text: 'The new version is installed on the Leader but not live on the fleets yet. Use Commit & deploy below to roll it out.',
+      });
+    }
 
     setUpdatingPackId(null);
     setUpdatePackMessage(
@@ -472,7 +684,147 @@ export function PacksView() {
         [...new Set([...current, ...needsOriginalConfig])].filter((groupId) => failedGroupIds.includes(groupId)),
       );
     }
-  }, [isConfirmingOverwrite, originalConfigGroupIds, packDraft, packEdits, publishGroupIds, publishTargets, retry, selectedPack]);
+  }, [isConfirmingOverwrite, originalConfigGroupIds, packDraft, packEdits, plannedVersion, publishGroupIds, publishTargets, retry, selectedPack]);
+
+  const deployTargets = useMemo(
+    () =>
+      selectedPack && deployPlan?.packId === selectedPack.id ? deployPlan.targets : buildDeployTargets(publishTargets),
+    [deployPlan, publishTargets, selectedPack],
+  );
+
+  const handleCommitAndDeploy = useCallback(async () => {
+    if (!selectedPack) {
+      return;
+    }
+
+    const packId = selectedPack.id;
+    const packLabel = selectedPack.displayName ?? packId;
+    const fleetLabels = deployTargets.map((target) => target.label).join(', ');
+    const report = (text: string) => setDeployMessage({ packId, text });
+
+    if (deployTargets.length === 0) {
+      report('No fleets with this pack were found to deploy to.');
+      return;
+    }
+
+    if (!isConfirmingDeploy || !pendingChanges) {
+      setIsDeploying(true);
+      setDeployResults(null);
+      report('Checking uncommitted changes for this pack…');
+
+      try {
+        const pending = await fetchPendingPackChanges(packId, deployTargets.map((target) => target.groupId));
+
+        if (pending.conflictedFiles.length > 0) {
+          report(`These pack files have merge conflicts and must be resolved in Cribl before committing: ${pending.conflictedFiles.join(', ')}.`);
+          return;
+        }
+
+        if (pending.packFiles.length === 0) {
+          report(`No uncommitted changes for "${packLabel}" were found in ${fleetLabels}, so there is nothing to commit.`);
+          return;
+        }
+
+        setPendingChanges(pending);
+        setIsConfirmingDeploy(true);
+        report(
+          `This will commit the ${pending.packFiles.length} file${pending.packFiles.length === 1 ? '' : 's'} listed below for "${packLabel}" and deploy that commit to: ${fleetLabels}. ` +
+            `${pending.otherFiles.length > 0 ? `${pending.otherFiles.length} other uncommitted file${pending.otherFiles.length === 1 ? ' is' : 's are'} in these fleets and will be left out of the commit. ` : ''}` +
+            'Deploying also rolls out anything else already committed for these fleets. This cannot be undone. Click Confirm commit & deploy to continue.',
+        );
+      } catch (error) {
+        report(`Could not read uncommitted changes: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        setIsDeploying(false);
+      }
+
+      return;
+    }
+
+    setIsConfirmingDeploy(false);
+    setIsDeploying(true);
+
+    let commit: string;
+    try {
+      report(`Committing ${pendingChanges.packFiles.length} file${pendingChanges.packFiles.length === 1 ? '' : 's'}…`);
+      commit = await commitConfigChanges(`Update pack ${packId} (Fleet Inheritance Manager)`, pendingChanges.packFiles);
+    } catch (error) {
+      report(`Commit failed, so nothing was deployed: ${error instanceof Error ? error.message : String(error)}`);
+      setPendingChanges(null);
+      setIsDeploying(false);
+      return;
+    }
+
+    const shortCommit = commit.slice(0, 7);
+    const deployed: Array<{ target: PackDeployTarget; configVersion?: string }> = [];
+    const items: PackPublishResult[] = [];
+
+    for (const [index, target] of deployTargets.entries()) {
+      report(`[${index + 1}/${deployTargets.length}] Deploying commit ${shortCommit} to ${target.label}…`);
+
+      try {
+        deployed.push({ target, configVersion: await deployGroup(target.groupId, commit, target.product) });
+      } catch (error) {
+        items.push({
+          groupId: target.groupId,
+          label: target.label,
+          tone: 'error',
+          message: `Deploy failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    report('Checking the pack version each fleet reports…');
+    const reportedVersions = new Map<string, string | undefined>();
+
+    for (const { target } of deployed) {
+      try {
+        reportedVersions.set(target.groupId, (await fetchGroupPack(packId, target.groupId)).version);
+      } catch {
+        reportedVersions.set(target.groupId, undefined);
+      }
+    }
+
+    for (const { target, configVersion } of deployed) {
+      const packVersion = reportedVersions.get(target.groupId);
+      const parentVersion = target.parentGroupId ? reportedVersions.get(target.parentGroupId) : undefined;
+      const commitMatches = !configVersion || commit.startsWith(configVersion) || configVersion.startsWith(commit);
+      const inheritanceMatches = !target.parentGroupId || !parentVersion || packVersion === parentVersion;
+      const versionText = `reports pack version ${packVersion ?? 'unknown'}`;
+
+      items.push(
+        commitMatches && inheritanceMatches
+          ? {
+              groupId: target.groupId,
+              label: target.label,
+              tone: 'success',
+              message: `Deployed commit ${shortCommit}; this fleet ${versionText}.`,
+            }
+          : {
+              groupId: target.groupId,
+              label: target.label,
+              tone: 'warning',
+              message: !commitMatches
+                ? `Deploy was accepted, but Cribl reports config version ${configVersion} instead of ${shortCommit}; this fleet ${versionText}.`
+                : `Deployed commit ${shortCommit}, but this fleet ${versionText} while its parent reports ${parentVersion}. Reload in a moment to re-check.`,
+            },
+      );
+    }
+
+    const failedCount = items.filter((item) => item.tone === 'error').length;
+    setDeployResults({ packId, items });
+    report(
+      `Committed ${shortCommit} and deployed to ${deployTargets.length - failedCount} of ${deployTargets.length} fleet${deployTargets.length === 1 ? '' : 's'}.`,
+    );
+    setPendingChanges(null);
+    setIsDeploying(false);
+
+    if (failedCount === 0) {
+      setDeployPlan(null);
+    }
+
+    retry();
+  }, [deployTargets, isConfirmingDeploy, pendingChanges, retry, selectedPack]);
 
   useEffect(() => {
     if (
@@ -961,19 +1313,62 @@ export function PacksView() {
             ) : null}
 
             {publishResults?.packId === selectedPack.id && publishResults.items.length > 0 ? (
-              <ul className="publish-results" aria-label="Publish results by fleet">
-                {publishResults.items.map((item) => (
-                  <li key={item.groupId} className={`publish-result publish-result-${item.tone}`}>
-                    <Text variant="body-xs-semibold">
-                      {item.tone === 'success' ? 'Published' : item.tone === 'warning' ? 'Check' : 'Failed'}: {item.label}
-                    </Text>
-                    <Text variant="body-xs-normal" color="secondary">
-                      {item.message}
-                    </Text>
-                  </li>
-                ))}
-              </ul>
+              <PublishResultList items={publishResults.items} label="Publish results by fleet" successLabel="Published" />
             ) : null}
+
+            <div className="detail-section">
+              <Text as="h3" variant="heading-sm">
+                Commit &amp; deploy
+              </Text>
+              <div className="section-copy">
+                <Text variant="body-xs-normal" color="secondary">
+                  Published changes only reach fleets after they are committed and deployed. This commits only this pack&apos;s
+                  files and deploys to: {deployTargets.map((target) => target.label).join(', ') || 'no fleets'}.
+                </Text>
+              </div>
+              <div className="pill-row">
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={handleCommitAndDeploy}
+                  disabled={isDeploying || updatingPackId === selectedPack.id || deployTargets.length === 0}
+                >
+                  {isDeploying ? 'Working…' : isConfirmingDeploy ? 'Confirm commit & deploy' : 'Commit & deploy'}
+                </button>
+                {isConfirmingDeploy ? (
+                  <button
+                    type="button"
+                    className="pill pill-subtle"
+                    onClick={() => {
+                      setIsConfirmingDeploy(false);
+                      setPendingChanges(null);
+                      setDeployMessage({ packId: selectedPack.id, text: 'Commit & deploy cancelled. Nothing was changed.' });
+                    }}
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+              </div>
+              {deployMessage?.packId === selectedPack.id ? (
+                <div style={{ marginTop: '0.75rem' }} role="status" aria-live="polite">
+                  <Text variant="body-xs-normal" color="secondary">
+                    {deployMessage.text}
+                  </Text>
+                </div>
+              ) : null}
+              {isConfirmingDeploy && pendingChanges ? (
+                <ul className="publish-results" aria-label="Files to commit">
+                  {pendingChanges.packFiles.map((file) => (
+                    <li key={file} className="publish-result">
+                      <Text variant="body-xs-normal">{file}</Text>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {deployResults?.packId === selectedPack.id && deployResults.items.length > 0 ? (
+                <PublishResultList items={deployResults.items} label="Deploy results by fleet" successLabel="Deployed" />
+              ) : null}
+            </div>
 
             {isEditingPack && packDraft ? (
               <div className="detail-section" style={{ marginTop: '1rem' }}>
@@ -1027,10 +1422,11 @@ export function PacksView() {
                                 {target.product ? <FleetProductBadge product={target.product} /> : null}
                               </span>
                               <Text variant="body-xs-normal" color="secondary">
-                                {`${target.version ?? 'Unknown version'} → ${describeNextVersion(target.version ?? selectedPack.version)}`}
+                                {`${target.version ?? 'Unknown version'} → ${target.parentGroupId ? `${plannedVersion} (via ${target.parentLabel})` : plannedVersion}`}
                                 {target.inheritingFleets.length > 0
-                                  ? ` · Also inherited by: ${target.inheritingFleets.join(', ')}`
+                                  ? ` · Also inherited by: ${target.inheritingFleets.map((child) => child.label).join(', ')}`
                                   : ''}
+                                {target.parentLabel ? ` · Inherits from ${target.parentLabel}` : ''}
                                 {usesOriginalConfig ? ' · Will publish from original configuration (local modifications discarded)' : ''}
                               </Text>
                             </span>

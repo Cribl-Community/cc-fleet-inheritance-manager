@@ -17,7 +17,7 @@ import type {
   PipelineContentPreview,
   RouteContentPreview,
 } from './types';
-import { rewritePackArchive, type PackMetadataEdits } from './packArchive.ts';
+import { readPackArchiveVersion, rewritePackArchive, type PackMetadataEdits } from './packArchive.ts';
 
 type ApiRecord = Record<string, unknown>;
 const FLEET_PRODUCTS: FleetProduct[] = ['stream', 'edge'];
@@ -759,6 +759,7 @@ export async function fetchPackRelationshipSummaries(): Promise<PackRelationship
         product: fleet.product,
         status: pack.status,
         inheritedFrom: pack.inheritedFrom,
+        parentFleetId: fleet.parentId,
         configDrift: pack.configDrift,
         version: pack.version,
       });
@@ -808,9 +809,16 @@ export async function fetchPackRelationshipSummaries(): Promise<PackRelationship
 }
 
 export async function fetchPack(packId: string): Promise<Pack> {
-  const item = await fetchRecord(`/packs/${encodePathSegment(packId)}`);
+  const payload = await fetchRecord(`/packs/${encodePathSegment(packId)}`);
 
-  return mapPack(item);
+  return mapPack(getCollectionItems(payload)[0] ?? payload);
+}
+
+/** Read the pack as a specific group sees it (including packs it inherits from a parent fleet). */
+export async function fetchGroupPack(packId: string, groupId: string): Promise<Pack> {
+  const payload = await fetchRecord(`/m/${encodeURIComponent(groupId)}/packs/${encodePathSegment(packId)}`);
+
+  return mapPack(getCollectionItems(payload)[0] ?? payload, groupId);
 }
 
 export async function exportPack(
@@ -844,7 +852,9 @@ export async function exportPack(
     }
 
     const lowered = details.toLowerCase();
-    if (lowered.includes('enoent') && lowered.includes('package.json')) {
+    // Cribl copies the pack into a ".tmp" folder to build the export; ENOENT there means this group has no
+    // complete copy of the pack of its own (for example package.json or default/ is missing).
+    if (lowered.includes('enoent') && (lowered.includes('package.json') || lowered.includes('.tmp'))) {
       throw new PackExportAssemblyError(
         `Failed to export pack ${packId} (${mode} mode): Cribl could not assemble the temporary package. Endpoint: ${url}. Original error: ${details}`,
         response.status,
@@ -895,22 +905,25 @@ export interface PublishPackEditsResult {
   warnings: string[];
 }
 
+export interface ExportedPackArchive {
+  archive: Uint8Array<ArrayBuffer>;
+  exportMode: 'merge' | 'default_only';
+  version?: string;
+}
+
 /**
- * Export the installed pack, rewrite its package.json with the edits (and a
- * patch version bump), upload the new archive, and upgrade the pack to it.
- * `default_only` export is used only when explicitly allowed, because it drops
- * local modifications made to the pack.
+ * Export the installed pack from a group so it can be edited. `default_only` export is used only when
+ * explicitly allowed, because it drops local modifications made to the pack.
  */
-export async function publishPackEdits(
+export async function exportPackForEditing(
   packId: string,
-  edits: PackMetadataEdits,
   options: { groupId?: string; allowOriginalConfigExport?: boolean; onProgress?: (step: string) => void } = {},
-): Promise<PublishPackEditsResult> {
+): Promise<ExportedPackArchive> {
   const { groupId, allowOriginalConfigExport = false, onProgress } = options;
   const filename = `${packId}.crbl`;
 
   onProgress?.('Exporting the installed pack…');
-  let exportMode: PublishPackEditsResult['exportMode'] = 'merge';
+  let exportMode: ExportedPackArchive['exportMode'] = 'merge';
   let exported: Blob;
 
   try {
@@ -925,8 +938,26 @@ export async function publishPackEdits(
     exported = await exportPack(packId, 'default_only', filename, groupId);
   }
 
+  const archive = new Uint8Array(await exported.arrayBuffer());
+
+  return { archive, exportMode, version: await readPackArchiveVersion(archive) };
+}
+
+/**
+ * Rewrite an exported pack's package.json with the edits, upload it, and upgrade the pack to it.
+ * `version` sets the exact new version; without it the exported version's patch number is bumped.
+ */
+export async function installEditedPack(
+  packId: string,
+  exported: ExportedPackArchive,
+  edits: PackMetadataEdits,
+  options: { groupId?: string; version?: string; onProgress?: (step: string) => void } = {},
+): Promise<PublishPackEditsResult> {
+  const { groupId, version, onProgress } = options;
+  const filename = `${packId}.crbl`;
+
   onProgress?.('Applying your edits to package.json…');
-  const rewritten = await rewritePackArchive(new Uint8Array(await exported.arrayBuffer()), edits);
+  const rewritten = await rewritePackArchive(exported.archive, edits, { version });
 
   onProgress?.(`Uploading version ${rewritten.newVersion}…`);
   const source = await uploadPack(new Blob([rewritten.archive]), filename, groupId);
@@ -935,11 +966,28 @@ export async function publishPackEdits(
   const pack = await updatePack(packId, source, { minor: true, allowCustomFunctions: true, groupId });
 
   const warnings = [...rewritten.warnings];
-  if (exportMode === 'default_only') {
+  if (exported.exportMode === 'default_only') {
     warnings.push('Local modifications to this pack were not included, because only the original pack configuration could be exported.');
   }
 
-  return { pack, previousVersion: rewritten.previousVersion, newVersion: rewritten.newVersion, exportMode, warnings };
+  return {
+    pack,
+    previousVersion: rewritten.previousVersion,
+    newVersion: rewritten.newVersion,
+    exportMode: exported.exportMode,
+    warnings,
+  };
+}
+
+/** Export, edit, upload, and upgrade the pack in one group. */
+export async function publishPackEdits(
+  packId: string,
+  edits: PackMetadataEdits,
+  options: { groupId?: string; version?: string; allowOriginalConfigExport?: boolean; onProgress?: (step: string) => void } = {},
+): Promise<PublishPackEditsResult> {
+  const exported = await exportPackForEditing(packId, options);
+
+  return installEditedPack(packId, exported, edits, options);
 }
 
 export async function updatePack(
@@ -1394,6 +1442,95 @@ export async function fetchFleetPacks(groupId: string, product: FleetProduct = '
 
     return [];
   });
+}
+
+export interface PendingPackChanges {
+  /** Uncommitted files belonging to this pack in the given groups. */
+  packFiles: string[];
+  /** Other uncommitted files in the same groups, which are left out of the commit. */
+  otherFiles: string[];
+  conflictedFiles: string[];
+}
+
+/** List uncommitted config files for a pack in the given groups, from the Leader's git working tree. */
+export async function fetchPendingPackChanges(packId: string, groupIds: string[]): Promise<PendingPackChanges> {
+  const payload = await fetchRecord('/version/status');
+  const status = getCollectionItems(payload)[0] ?? payload;
+  const paths = new Set<string>();
+
+  if (Array.isArray(status.files)) {
+    status.files.forEach((file) => {
+      const path = isRecord(file) ? readString(file.path) : undefined;
+      if (path) {
+        paths.add(path);
+      }
+    });
+  }
+
+  for (const key of ['not_added', 'created', 'deleted', 'modified', 'staged']) {
+    const list = status[key];
+    if (Array.isArray(list)) {
+      list.forEach((path) => typeof path === 'string' && paths.add(path));
+    }
+  }
+
+  if (Array.isArray(status.renamed)) {
+    status.renamed.forEach((rename) => {
+      const to = isRecord(rename) ? readString(rename.to) : undefined;
+      if (to) {
+        paths.add(to);
+      }
+    });
+  }
+
+  const conflicted = Array.isArray(status.conflicted)
+    ? status.conflicted.filter((path): path is string => typeof path === 'string')
+    : [];
+  const groupPrefixes = groupIds.map((groupId) => `groups/${groupId}/`);
+  const packKey = packId.toLowerCase();
+  const inGroups = (path: string) => groupPrefixes.some((prefix) => path.startsWith(prefix));
+  const isPackFile = (path: string) => path.toLowerCase().split('/').includes(packKey);
+  const scoped = [...paths].filter(inGroups).sort();
+
+  return {
+    packFiles: scoped.filter(isPackFile),
+    otherFiles: scoped.filter((path) => !isPackFile(path)),
+    conflictedFiles: conflicted.filter((path) => inGroups(path) && isPackFile(path)),
+  };
+}
+
+/** Commit only the listed files and return the new commit hash. */
+export async function commitConfigChanges(message: string, files: string[]): Promise<string> {
+  const response = await fetch(`${requireBaseUrl()}/version/commit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, files }),
+  });
+  const payload = await handleResponse<unknown>(response);
+  const item = getCollectionItems(payload)[0] ?? (isRecord(payload) ? payload : undefined);
+  const commit = item ? readString(item.commit) : undefined;
+
+  if (!commit) {
+    throw new ApiError('Cribl did not return a commit hash for the commit.', response.status, payload);
+  }
+
+  return commit;
+}
+
+/** Deploy a commit to a fleet and return the config version Cribl reports for it afterwards. */
+export async function deployGroup(groupId: string, version: string, product?: FleetProduct): Promise<string | undefined> {
+  const endpoint = product
+    ? `${requireBaseUrl()}/products/${encodeURIComponent(product)}/groups/${encodeURIComponent(groupId)}/deploy`
+    : `${requireBaseUrl()}/master/groups/${encodeURIComponent(groupId)}/deploy`;
+  const response = await fetch(endpoint, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
+  });
+  const payload = await handleResponse<unknown>(response);
+  const item = getCollectionItems(payload)[0] ?? (isRecord(payload) ? payload : undefined);
+
+  return item ? readString(item.configVersion) : undefined;
 }
 
 export { ApiError };

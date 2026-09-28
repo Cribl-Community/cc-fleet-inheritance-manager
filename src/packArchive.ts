@@ -212,18 +212,48 @@ function replaceEntryData(tar: Uint8Array, entry: TarEntry, newData: Uint8Array)
 }
 
 export function bumpPatchVersion(version: unknown): string {
-  const match = typeof version === 'string' ? /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version.trim()) : null;
+  const parts = parseVersion(version);
 
-  if (!match) {
+  if (!parts) {
     throw new Error(`Pack version "${String(version)}" is not a semantic version, so it cannot be bumped automatically.`);
   }
 
-  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+  return `${parts[0]}.${parts[1]}.${parts[2] + 1}`;
+}
+
+function parseVersion(version: unknown): [number, number, number] | null {
+  const match = typeof version === 'string' ? /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version.trim()) : null;
+
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+/** Compare two semantic versions by major.minor.patch. Returns a negative number, zero, or a positive number. */
+export function compareVersions(left: string, right: string): number {
+  const a = parseVersion(left);
+  const b = parseVersion(right);
+
+  if (!a || !b) {
+    throw new Error(`Cannot compare versions "${left}" and "${right}".`);
+  }
+
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+}
+
+/** The next patch version after the highest semantic version in the list, so every fleet can share one version. */
+export function nextSharedVersion(versions: Array<string | undefined>): string {
+  const valid = versions.filter((version): version is string => parseVersion(version) !== null);
+
+  if (valid.length === 0) {
+    throw new Error('None of the fleets report a semantic pack version, so a new version cannot be chosen automatically.');
+  }
+
+  return bumpPatchVersion(valid.reduce((latest, version) => (compareVersions(version, latest) > 0 ? version : latest)));
 }
 
 export function applyPackMetadataEdits(
   packageJson: Record<string, unknown>,
   edits: PackMetadataEdits,
+  targetVersion?: string,
 ): { packageJson: Record<string, unknown>; warnings: string[] } {
   const next: Record<string, unknown> = { ...packageJson };
   const warnings: string[] = [];
@@ -249,15 +279,24 @@ export function applyPackMetadataEdits(
   }
 
   // Cribl rejects an upgrade to the same version ("Version x is up to date").
-  next.version = bumpPatchVersion(packageJson.version);
+  if (targetVersion === undefined) {
+    next.version = bumpPatchVersion(packageJson.version);
+  } else {
+    if (!parseVersion(targetVersion)) {
+      throw new Error(`Target version "${targetVersion}" is not a semantic version.`);
+    }
+
+    if (parseVersion(packageJson.version) && compareVersions(targetVersion, String(packageJson.version)) <= 0) {
+      throw new Error(`Target version ${targetVersion} is not newer than the installed version ${String(packageJson.version)}.`);
+    }
+
+    next.version = targetVersion;
+  }
 
   return { packageJson: next, warnings };
 }
 
-export async function rewritePackArchive(
-  crbl: Uint8Array<ArrayBuffer>,
-  edits: PackMetadataEdits,
-): Promise<RewrittenPackArchive> {
+async function readArchivePackageJson(crbl: Uint8Array<ArrayBuffer>) {
   const isGzip = crbl.length >= 2 && crbl[0] === 0x1f && crbl[1] === 0x8b;
   const tar = isGzip ? await pipeBytes(crbl, new DecompressionStream('gzip')) : crbl;
   const entry = findPackageJsonEntry(listTarEntries(tar));
@@ -273,8 +312,23 @@ export async function rewritePackArchive(
     throw new Error('The pack package.json is not a JSON object.');
   }
 
-  const packageJson = original as Record<string, unknown>;
-  const { packageJson: updated, warnings } = applyPackMetadataEdits(packageJson, edits);
+  return { tar, entry, packageJson: original as Record<string, unknown> };
+}
+
+/** Read the version recorded in an exported pack's package.json. */
+export async function readPackArchiveVersion(crbl: Uint8Array<ArrayBuffer>): Promise<string | undefined> {
+  const { packageJson } = await readArchivePackageJson(crbl);
+
+  return typeof packageJson.version === 'string' ? packageJson.version : undefined;
+}
+
+export async function rewritePackArchive(
+  crbl: Uint8Array<ArrayBuffer>,
+  edits: PackMetadataEdits,
+  options: { version?: string } = {},
+): Promise<RewrittenPackArchive> {
+  const { tar, entry, packageJson } = await readArchivePackageJson(crbl);
+  const { packageJson: updated, warnings } = applyPackMetadataEdits(packageJson, edits, options.version);
   const rewrittenTar = replaceEntryData(tar, entry, encoder.encode(`${JSON.stringify(updated, null, 2)}\n`));
 
   return {

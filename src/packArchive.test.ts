@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { applyPackMetadataEdits, bumpPatchVersion, rewritePackArchive } from './packArchive.ts';
+import {
+  applyPackMetadataEdits,
+  bumpPatchVersion,
+  compareVersions,
+  nextSharedVersion,
+  readPackArchiveVersion,
+  rewritePackArchive,
+} from './packArchive.ts';
 import { buildCrbl, extractCrbl } from './test/crblFixture.ts';
 
 const longPath = `default/pipelines/${'nested-directory-name/'.repeat(5)}conf.yml`;
@@ -60,4 +67,25 @@ test('bumpPatchVersion increments the patch number and rejects non-semver versio
   assert.equal(bumpPatchVersion('2.0.0-beta.1'), '2.0.1');
   assert.throws(() => bumpPatchVersion('latest'), /not a semantic version/);
   assert.throws(() => bumpPatchVersion(undefined), /not a semantic version/);
+});
+
+test('nextSharedVersion bumps the latest version across fleets, compared numerically', () => {
+  assert.equal(nextSharedVersion(['1.2.7', '1.2.11', undefined, 'latest', '1.2.10']), '1.2.12');
+  assert.equal(nextSharedVersion(['1.10.0', '1.9.9']), '1.10.1');
+  assert.throws(() => nextSharedVersion([undefined, 'latest']), /None of the fleets/);
+  assert.ok(compareVersions('1.2.11', '1.2.7') > 0);
+  assert.equal(compareVersions('1.2.7', '1.2.7'), 0);
+});
+
+test('rewritePackArchive applies an explicit shared version and refuses one that is not newer', async () => {
+  const crbl = buildCrbl({ 'package.json': JSON.stringify({ name: 'demo-pack', version: '1.2.7' }) });
+
+  assert.equal(await readPackArchiveVersion(crbl), '1.2.7');
+
+  const result = await rewritePackArchive(crbl, { author: 'Me' }, { version: '1.2.12' });
+
+  assert.equal(result.previousVersion, '1.2.7');
+  assert.equal(result.newVersion, '1.2.12');
+  assert.equal(JSON.parse(extractCrbl(result.archive)['package.json']).version, '1.2.12');
+  await assert.rejects(() => rewritePackArchive(crbl, { author: 'Me' }, { version: '1.2.7' }), /not newer than the installed version 1\.2\.7/);
 });
