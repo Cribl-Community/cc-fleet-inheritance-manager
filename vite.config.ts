@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { join } from 'path'
 import react from '@vitejs/plugin-react'
+import optimizeLocales from '@react-aria/optimize-locales-plugin'
 // @ts-ignore
 import { servePackageTgz } from '@cribl/apps/package'
 // @ts-ignore
@@ -84,7 +85,16 @@ const injectScriptFromQueryPlugin = () => {
 };
 
 export default defineConfig({
-  plugins: [react(), packageEndpointPlugin(), injectScriptFromQueryPlugin(), backendWatchPlugin(), backendPreviewPlugin()],
+  plugins: [
+    // The app UI is English-only; drop react-aria's bundled translations for other languages
+    // (missing locales fall back to en-US strings).
+    optimizeLocales.vite({ locales: ['en-US'] }),
+    react(),
+    packageEndpointPlugin(),
+    injectScriptFromQueryPlugin(),
+    backendWatchPlugin(),
+    backendPreviewPlugin(),
+  ],
   base: './',
   server: {
     cors: true,

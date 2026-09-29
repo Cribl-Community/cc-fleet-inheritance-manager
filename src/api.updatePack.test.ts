@@ -46,6 +46,48 @@ test('fetchPacks converts string source values to a usable pack source object', 
   }
 });
 
+test('fetchPackRelationshipSummaries fetches each resource once and still detects route drift', async () => {
+  const originalFetch = globalThis.fetch;
+  const counts = new Map<string, number>();
+  const responses: Record<string, unknown> = {
+    '/api/v1/packs': [{ id: 'drift-pack' }],
+    '/api/v1/products/stream/groups': [{ id: 'fleet-a' }, { id: 'fleet-b' }],
+    '/api/v1/products/edge/groups': [],
+    '/api/v1/m/fleet-a/packs': [{ id: 'drift-pack' }],
+    '/api/v1/m/fleet-b/packs': [{ id: 'drift-pack' }],
+    '/api/v1/m/fleet-a/p/drift-pack/routes': [{ routes: [{ id: 'r1', filter: 'true' }] }],
+    '/api/v1/m/fleet-b/p/drift-pack/routes': [{ routes: [{ id: 'r1', filter: 'false' }] }],
+  };
+
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    counts.set(url, (counts.get(url) ?? 0) + 1);
+
+    return url in responses
+      ? new Response(JSON.stringify(responses[url]), { status: 200 })
+      : new Response('Not Found', { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const summaries = await api.fetchPackRelationshipSummaries();
+    const summary = summaries.find((entry) => entry.id === 'drift-pack');
+
+    assert.ok(summary);
+    assert.deepEqual(summary.usageLocations.map((location) => location.fleetId), ['fleet-a', 'fleet-b']);
+    assert.deepEqual([...counts.entries()].filter(([, count]) => count > 1), []);
+
+    counts.clear();
+    const packs = await api.fetchPacks();
+    const pack = packs.find((entry) => entry.id === 'drift-pack');
+
+    assert.equal(pack?.configDrift, true);
+    assert.equal(pack?.status, 'inherited-modified');
+    assert.deepEqual([...counts.entries()].filter(([, count]) => count > 1), []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('exportPack tries the group-scoped endpoint first and falls back to the root endpoint on 404', async () => {
   const originalFetch = globalThis.fetch;
   const urls: string[] = [];

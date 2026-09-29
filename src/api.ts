@@ -408,12 +408,11 @@ async function handleResponse<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function fetchCollection(endpoint: string): Promise<ApiRecord[]> {
-  const baseUrl = requireBaseUrl();
-  const response = await fetch(`${baseUrl}${endpoint}`);
-  const payload = await handleResponse<unknown>(response);
+/** GET responses shared within one page load, so a resource needed by several loaders is only fetched once. */
+type RequestCache = Map<string, Promise<unknown>>;
 
-  return getCollectionItems(payload);
+async function fetchCollection(endpoint: string, cache?: RequestCache): Promise<ApiRecord[]> {
+  return getCollectionItems(await fetchJsonCached(endpoint, cache));
 }
 
 async function fetchJson(endpoint: string): Promise<unknown> {
@@ -423,13 +422,25 @@ async function fetchJson(endpoint: string): Promise<unknown> {
   return handleResponse<unknown>(response);
 }
 
-async function fetchRecord(endpoint: string): Promise<ApiRecord> {
-  const baseUrl = requireBaseUrl();
-  const response = await fetch(`${baseUrl}${endpoint}`);
-  const payload = await handleResponse<unknown>(response);
+function fetchJsonCached(endpoint: string, cache?: RequestCache): Promise<unknown> {
+  if (!cache) {
+    return fetchJson(endpoint);
+  }
+
+  let pending = cache.get(endpoint);
+  if (!pending) {
+    pending = fetchJson(endpoint);
+    cache.set(endpoint, pending);
+  }
+
+  return pending;
+}
+
+async function fetchRecord(endpoint: string, cache?: RequestCache): Promise<ApiRecord> {
+  const payload = await fetchJsonCached(endpoint, cache);
 
   if (!isRecord(payload)) {
-    throw new ApiError(`Unexpected response shape for ${endpoint}`, response.status, payload);
+    throw new ApiError(`Unexpected response shape for ${endpoint}`, 200, payload);
   }
 
   return payload;
@@ -447,14 +458,14 @@ function sortFleets(fleets: Fleet[]): Fleet[] {
   });
 }
 
-export async function fetchGroups(product: FleetProduct = 'stream'): Promise<Fleet[]> {
-  const items = await fetchCollection(`/products/${product}/groups`);
+export async function fetchGroups(product: FleetProduct = 'stream', cache?: RequestCache): Promise<Fleet[]> {
+  const items = await fetchCollection(`/products/${product}/groups`, cache);
 
   return items.map((item) => mapFleet(item, product));
 }
 
-export async function fetchAllFleets(): Promise<Fleet[]> {
-  const results = await Promise.allSettled(FLEET_PRODUCTS.map((product) => fetchGroups(product)));
+export async function fetchAllFleets(cache?: RequestCache): Promise<Fleet[]> {
+  const results = await Promise.allSettled(FLEET_PRODUCTS.map((product) => fetchGroups(product, cache)));
   const fleets: Fleet[] = [];
 
   results.forEach((result, index) => {
@@ -512,33 +523,29 @@ function dedupePacks(packs: Pack[]): Pack[] {
   return Array.from(byId.values());
 }
 
-async function fetchGroupScopedCollection(groupId: string, endpoint: string): Promise<ApiRecord[]> {
-  const baseUrl = requireBaseUrl();
-  const response = await fetch(`${baseUrl}/m/${encodeURIComponent(groupId)}${endpoint}`);
-
-  if (!response.ok) {
-    return [];
-  }
+async function fetchGroupScopedCollection(groupId: string, endpoint: string, cache?: RequestCache): Promise<ApiRecord[]> {
+  requireBaseUrl();
 
   try {
-    const payload = await handleResponse<unknown>(response);
-    return getCollectionItems(payload);
-  } catch {
+    return getCollectionItems(await fetchGroupScopedJson(groupId, endpoint, cache));
+  } catch (error) {
+    // Error responses and unreadable bodies mean "no items"; network failures still propagate.
+    if (error instanceof TypeError) {
+      throw error;
+    }
+
     return [];
   }
 }
 
-async function fetchGroupScopedCollectionStrict(groupId: string, endpoint: string): Promise<ApiRecord[]> {
-  const payload = await fetchGroupScopedJson(groupId, endpoint);
+async function fetchGroupScopedCollectionStrict(groupId: string, endpoint: string, cache?: RequestCache): Promise<ApiRecord[]> {
+  const payload = await fetchGroupScopedJson(groupId, endpoint, cache);
 
   return getCollectionItems(payload);
 }
 
-async function fetchGroupScopedJson(groupId: string, endpoint: string): Promise<unknown> {
-  const baseUrl = requireBaseUrl();
-  const response = await fetch(`${baseUrl}/m/${encodePathSegment(groupId)}${endpoint}`);
-
-  return handleResponse<unknown>(response);
+async function fetchGroupScopedJson(groupId: string, endpoint: string, cache?: RequestCache): Promise<unknown> {
+  return fetchJsonCached(`/m/${encodePathSegment(groupId)}${endpoint}`, cache);
 }
 
 function normalizeRouteEntries(items: ApiRecord[]): Array<Record<string, unknown>> {
@@ -573,7 +580,12 @@ function routeSignature(entries: Array<Record<string, unknown>>): string {
   })));
 }
 
-async function detectPackConfigDrift(groupId: string, packId: string, sourceGroupIds: string[] = []): Promise<boolean> {
+async function detectPackConfigDrift(
+  groupId: string,
+  packId: string,
+  sourceGroupIds: string[] = [],
+  cache?: RequestCache,
+): Promise<boolean> {
   const uniqueSourceGroupIds = Array.from(
     new Set(sourceGroupIds.filter((candidate): candidate is string => Boolean(candidate && candidate !== groupId))),
   );
@@ -586,8 +598,8 @@ async function detectPackConfigDrift(groupId: string, packId: string, sourceGrou
     const routeComparisons = await Promise.all(
       uniqueSourceGroupIds.map(async (sourceGroupId) => {
         const [sourceRoutes, targetRoutes] = await Promise.all([
-          fetchGroupScopedCollectionStrict(sourceGroupId, `/p/${encodePathSegment(packId)}/routes`),
-          fetchGroupScopedCollectionStrict(groupId, `/p/${encodePathSegment(packId)}/routes`),
+          fetchGroupScopedCollectionStrict(sourceGroupId, `/p/${encodePathSegment(packId)}/routes`, cache),
+          fetchGroupScopedCollectionStrict(groupId, `/p/${encodePathSegment(packId)}/routes`, cache),
         ]);
 
         const sourceEntries = normalizeRouteEntries(sourceRoutes);
@@ -603,82 +615,95 @@ async function detectPackConfigDrift(groupId: string, packId: string, sourceGrou
   }
 }
 
-async function fetchFleetPackEntries(product: FleetProduct): Promise<Pack[]> {
-  const groups = await fetchCollection(`/products/${product}/groups`);
-  const packs: Pack[] = [];
+interface FleetPackEntry {
+  pack: Pack;
+  groupId: string;
+  /** Packs read from the group-scoped endpoint are compared against the same pack in other fleets. */
+  checkDrift: boolean;
+}
 
-  for (const group of groups) {
-    const groupId = readString(group.id);
-    if (!groupId) {
-      continue;
-    }
+async function fetchFleetPackEntries(product: FleetProduct, cache?: RequestCache): Promise<FleetPackEntry[]> {
+  const groups = await fetchCollection(`/products/${product}/groups`, cache);
+  const groupIds = groups.map((group) => readString(group.id)).filter((groupId): groupId is string => Boolean(groupId));
 
-    const groupScopedPacks = await fetchGroupScopedCollection(groupId, '/packs');
+  // Fleets are independent, so load them all at once; results keep the fleet order.
+  const perGroup = await Promise.all(groupIds.map(async (groupId): Promise<FleetPackEntry[]> => {
+    const groupScopedPacks = await fetchGroupScopedCollection(groupId, '/packs', cache);
     if (groupScopedPacks.length > 0) {
-      const mapped = await Promise.all(groupScopedPacks.map(async (item) => {
-        const pack = mapPack(item, groupId);
-        const sourceCandidates = Array.from(
-          new Set([
-            ...(pack.inheritedFrom ? [pack.inheritedFrom] : []),
-            ...getPackGroupCandidates(pack.id),
-            ...(pack.groupIds ?? []),
-          ]),
-        );
-
-        if (sourceCandidates.length > 0) {
-          pack.configDrift = await detectPackConfigDrift(groupId, pack.id, sourceCandidates);
-          pack.status = resolvePackInheritanceStatus(pack);
-        }
-
-        return pack;
-      }));
-
-      packs.push(...mapped);
-      continue;
+      return groupScopedPacks.map((item) => ({ pack: mapPack(item, groupId), groupId, checkDrift: true }));
     }
 
+    const entries: FleetPackEntry[] = [];
     try {
-      const detail = await fetchRecord(`/products/${product}/groups/${encodePathSegment(groupId)}`);
+      const detail = await fetchRecord(`/products/${product}/groups/${encodePathSegment(groupId)}`, cache);
       if (Array.isArray(detail.packs)) {
         detail.packs.forEach((packItem) => {
           if (typeof packItem === 'string') {
             rememberPackGroup(packItem, groupId);
-            packs.push({
-              id: packItem,
-              displayName: packItem,
-              groupIds: [groupId],
-              inheritedFrom: groupId,
-              configDrift: false,
-              status: 'inherited',
+            entries.push({
+              pack: {
+                id: packItem,
+                displayName: packItem,
+                groupIds: [groupId],
+                inheritedFrom: groupId,
+                configDrift: false,
+                status: 'inherited',
+              },
+              groupId,
+              checkDrift: false,
             });
             return;
           }
 
           if (isRecord(packItem)) {
-            packs.push(mapPack(packItem, groupId));
+            entries.push({ pack: mapPack(packItem, groupId), groupId, checkDrift: false });
           }
         });
       }
     } catch {
       // Some deployments expose packs only in the group-scoped /m/{group}/packs endpoint.
     }
-  }
 
-  return packs;
+    return entries;
+  }));
+
+  return perGroup.flat();
 }
 
-export async function fetchPacks(): Promise<Pack[]> {
-  const result = await Promise.allSettled([
-    fetchCollection('/packs').then((items) => items.map((item) => mapPack(item))),
-    fetchFleetPackEntries('stream'),
-    fetchFleetPackEntries('edge'),
+export async function fetchPacks(cache: RequestCache = new Map()): Promise<Pack[]> {
+  const [rootResult, ...fleetResults] = await Promise.allSettled([
+    fetchCollection('/packs', cache).then((items) => items.map((item) => mapPack(item))),
+    fetchFleetPackEntries('stream', cache),
+    fetchFleetPackEntries('edge', cache),
   ]);
+
+  const entries = fleetResults.flatMap((result) => (result.status === 'fulfilled' ? result.value : []));
+
+  // Every fleet's packs are known now, so each pack is compared against all other fleets that have it.
+  await Promise.all(entries.filter((entry) => entry.checkDrift).map(async ({ pack, groupId }) => {
+    const sourceCandidates = Array.from(
+      new Set([
+        ...(pack.inheritedFrom ? [pack.inheritedFrom] : []),
+        ...getPackGroupCandidates(pack.id),
+        ...(pack.groupIds ?? []),
+      ]),
+    );
+
+    if (sourceCandidates.length > 0) {
+      pack.configDrift = await detectPackConfigDrift(groupId, pack.id, sourceCandidates, cache);
+      pack.status = resolvePackInheritanceStatus(pack);
+    }
+  }));
 
   const packs: Pack[] = [];
 
-  result.forEach((entry) => {
-    if (entry.status === 'fulfilled') {
-      packs.push(...entry.value);
+  if (rootResult.status === 'fulfilled') {
+    packs.push(...rootResult.value);
+  }
+
+  fleetResults.forEach((result) => {
+    if (result.status === 'fulfilled') {
+      packs.push(...result.value.map((entry) => entry.pack));
     }
   });
 
@@ -714,13 +739,16 @@ function dedupePackReferences(references: PackReference[]): PackReference[] {
 }
 
 export async function fetchPackRelationshipSummaries(): Promise<PackRelationshipSummary[]> {
-  const [packs, fleets] = await Promise.all([fetchPacks(), fetchAllFleets()]);
-  const packUsageResults = await Promise.allSettled(
+  // One cache for the whole load: fleets and fleet pack lists are shared by every loader below.
+  const cache: RequestCache = new Map();
+  const fleetsPromise = fetchAllFleets(cache);
+  const packUsagePromise = fleetsPromise.then((fleets) => Promise.allSettled(
     fleets.map(async (fleet) => ({
       fleet,
-      packs: await fetchFleetPacks(fleet.id, fleet.product),
+      packs: await fetchFleetPacks(fleet.id, fleet.product, cache),
     })),
-  );
+  ));
+  const [packs, packUsageResults] = await Promise.all([fetchPacks(cache), packUsagePromise]);
 
   const packNameLookup = new Map<string, string>();
   const summariesById = new Map<string, PackRelationshipSummary>();
@@ -1724,14 +1752,14 @@ export function describeApiError(error: unknown): string {
     : error.message;
 }
 
-export async function fetchFleetPacks(groupId: string, product: FleetProduct = 'stream'): Promise<Pack[]> {
-  const groupScopedPacks = await fetchGroupScopedCollection(groupId, '/packs');
+export async function fetchFleetPacks(groupId: string, product: FleetProduct = 'stream', cache?: RequestCache): Promise<Pack[]> {
+  const groupScopedPacks = await fetchGroupScopedCollection(groupId, '/packs', cache);
 
   if (groupScopedPacks.length > 0) {
     return dedupePacks(groupScopedPacks.map((item) => mapPack(item, groupId)));
   }
 
-  const item = await fetchRecord(`/products/${product}/groups/${encodePathSegment(groupId)}`);
+  const item = await fetchRecord(`/products/${product}/groups/${encodePathSegment(groupId)}`, cache);
 
   if (!Array.isArray(item.packs)) {
     return [];
