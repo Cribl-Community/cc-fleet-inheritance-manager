@@ -4,7 +4,7 @@ A Cribl App for visualizing fleet and pack inheritance, finding fleets whose pac
 
 ## Summary
 
-Fleet Inheritance Manager helps Cribl administrators understand how packs flow through their Stream and Edge fleet hierarchy. It shows which fleets run each pack, whether a fleet's copy is local, inherited, or locally modified, and which fleets have pack contents (pipelines, routes, and lookups) that differ from the rest. From the same place you can edit pack contents and metadata, copy contents between fleets, and commit and deploy the result.
+Fleet Inheritance Manager helps Cribl administrators understand how packs flow through their Stream and Edge fleet hierarchy. It shows which fleets run each pack, whether a fleet's copy is local, inherited, or locally modified, and which fleets have pack contents (pipelines, routes, lookups, sources, and destinations) that differ from the rest. From the same place you can edit pack contents and metadata, copy contents between fleets, and commit and deploy the result.
 
 ## What This App Does
 
@@ -13,9 +13,9 @@ Fleet Inheritance Manager helps Cribl administrators understand how packs flow t
 - **Home screen** — In-app guide with features, a how-to workflow, and the full permission list. Select the app icon in the header to return to it at any time.
 - **Fleet hierarchy** — Expandable parent/child tree of Stream and Edge fleets with product filters, search, and fleet details (type, deployed version, last deploy and config update).
 - **Pack explorer** — Search packs by name, ID, description, tags, or fleet, then choose the fleet to work in.
-- **Content-identical grouping** — Fleets running a pack are grouped when their pipelines and routes match and their lookup files are the same size. Each group lists exactly what differs, and fleets that could not be fully read are shown separately.
-- **Make identical** — Copy pipelines, routes, and lookup files from a reference fleet so a drifting fleet matches it again.
-- **Knowledge object editing** — Edit pipeline definitions, route entries, and lookup rows inline, and optionally apply the same change to other fleets.
+- **Content-identical grouping** — Fleets running a pack are grouped when their pipelines, routes, sources, and destinations match and their lookup files are the same size. Each group lists exactly what differs, and fleets that could not be fully read are shown separately.
+- **Make identical** — Copy pipelines, routes, sources, destinations, and lookup files from a reference fleet so a drifting fleet matches it again.
+- **Knowledge object editing** — Edit pipeline definitions, route entries, sources, destinations, and lookup rows inline, and optionally apply the same change to other fleets.
 - **Pack metadata publishing** — Edit display name, description, author, and tags, then publish a new version to one or many fleets. All published fleets share one version number.
 - **Commit and deploy** — Commit pending pack changes and deploy them to the affected fleets, with per-fleet results and retry for failures.
 - **Inheritance charts** — Detailed tree, levels, lineage, and Sankey views of the fleet hierarchy, with per-fleet pack status (local, inherited, inherited and modified).
@@ -39,7 +39,7 @@ Use Fleet Inheritance Manager when you need to:
 - Understand which packs are deployed to which fleets, and where each fleet inherits them from
 - Find fleets whose copy of a pack has drifted from the others
 - Bring drifting fleets back in line without re-uploading packs by hand
-- Make the same pipeline, route, or lookup change across several fleets
+- Make the same pipeline, route, source, destination, or lookup change across several fleets
 - Update pack metadata and roll a new version out to many fleets at once
 - Audit pack inheritance before planning a change
 
@@ -129,7 +129,7 @@ The app declares the Cribl API permissions below in `config/policies.yml`. When 
 | Packs | `/packs`, `/packs/*` | GET, PUT, PATCH | Read packs, upload edited pack archives, and upgrade packs |
 | Fleet packs | `/m/:gid/packs`, `/m/:gid/packs/*` | GET, PUT, POST, PATCH | Read, upload, reinstall, and upgrade a pack within a specific fleet |
 | Pack export | `/packs/*/export`, `/m/:gid/packs/*/export` | GET | Export a pack, including local changes, before republishing or copying it |
-| Pack contents | `/p/*`, `/m/:gid/p/*` | GET, PATCH, POST | Read and edit pipelines, routes, and lookups; add a pipeline a fleet is missing |
+| Pack contents | `/p/*`, `/m/:gid/p/*` | GET, PATCH, POST | Read and edit pipelines, routes, sources, destinations, and lookups; add a pipeline, source, or destination a fleet is missing |
 | Version control | `/version/status`, `/version/commit` | GET, POST | Check for pending changes and commit them |
 | Deploy | `/products/stream/groups/*/deploy`, `/products/edge/groups/*/deploy`, `/master/groups/*/deploy` | PATCH | Deploy committed changes to fleets |
 
