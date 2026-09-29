@@ -1,7 +1,7 @@
 {
   "name": "fleet-inheritance-manager",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -30,14 +30,18 @@
     "vite": "^8.3.0"
   },
   "displayName": "Fleet Inheritance Manager",
-  "description": "This will help you manage your fleets packs and visualize inheritance of fleets. ",
+  "description": "Manage your fleets' packs and visualize fleet inheritance.",
   "author": "Nate Wood",
+  "license": "Apache-2.0",
   "minLogStreamVersion": "4.18.0",
   "cribl": {
     "type": "app",
     "createAppScriptVersion": "1.1.0"
   },
   "tags": {
-    "product": []
+    "product": [
+      "stream",
+      "edge"
+    ]
   }
 }

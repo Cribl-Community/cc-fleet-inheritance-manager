@@ -16,13 +16,13 @@ policies:
   - object: '/packs'
     actions: ['GET', 'PUT', 'PATCH']
   - object: '/packs/*'
-    actions: ['GET', 'PUT', 'PATCH', 'DELETE']
+    actions: ['GET', 'PUT', 'PATCH']
   - object: '/packs/*/export'
     actions: ['GET']
   - object: '/m/:gid/packs'
     actions: ['GET', 'PUT', 'POST', 'PATCH'] # POST reinstalls a pack over an existing copy (force) when copying contents between fleets
   - object: '/m/:gid/packs/*'
-    actions: ['GET', 'PUT', 'PATCH', 'DELETE']
+    actions: ['GET', 'PUT', 'PATCH']
   - object: '/m/:gid/packs/*/export'
     actions: ['GET']
 

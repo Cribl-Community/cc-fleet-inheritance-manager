@@ -65,15 +65,33 @@ This app only communicates with your Cribl Leader through documented Cribl APIs.
 4. Click **Install**, review the declared permissions, and complete setup
 5. Share the app with the users or teams who should manage fleet packs
 
-### If Not In Marketplace
+### Install From GitHub
 
-1. Download the latest `.tgz` package for the app
+The source and packaged app are published at [github.com/Cribl-Community/fleet-inheritance-manager](https://github.com/Cribl-Community/fleet-inheritance-manager).
+
+1. Download the latest `fleet-inheritance-manager-<version>.tgz` from the repository's [Releases](https://github.com/Cribl-Community/fleet-inheritance-manager/releases) page, or from the `build/` folder of the repository
 2. In Cribl, go to **Apps** → **Import from file**
 3. Upload the `.tgz`, review the declared permissions, and complete installation
+4. Share the app with the users or teams who should manage fleet packs
 
-## Configuration
+### Build From Source
 
-The app requires no configuration after installation. Open it and start from the home screen.
+```bash
+git clone https://github.com/Cribl-Community/fleet-inheritance-manager.git
+cd fleet-inheritance-manager
+npm install
+npm run package    # writes build/fleet-inheritance-manager-<version>.tgz
+```
+
+Then import the generated `.tgz` as described above.
+
+## Setup
+
+No configuration, secrets, or KV store values are needed. After installing:
+
+1. **Review permissions** — Confirm the Cribl API permissions shown at install time match the [Permissions](#permissions) table below.
+2. **Share the app** — An admin must share the app with each user or team. Sharing grants the declared permissions for requests made through the app.
+3. **Open the app** — Start from the home screen, then open **Fleets** to confirm all expected fleets are visible.
 
 | Setting | Required | Description | Example | Scope |
 |---|---|---|---|---|
@@ -108,8 +126,8 @@ The app declares the Cribl API permissions below in `config/policies.yml`. When 
 | Area | API paths | Methods | Used for |
 |---|---|---|---|
 | Fleets | `/products/stream/groups`, `/products/stream/groups/*`, `/products/edge/groups`, `/products/edge/groups/*` | GET | List fleets and read fleet details and hierarchy |
-| Packs | `/packs`, `/packs/*` | GET, PUT, PATCH, DELETE | Read packs, upload edited pack archives, and upgrade packs |
-| Fleet packs | `/m/:gid/packs`, `/m/:gid/packs/*` | GET, PUT, POST, PATCH, DELETE | Read, upload, reinstall, and upgrade a pack within a specific fleet |
+| Packs | `/packs`, `/packs/*` | GET, PUT, PATCH | Read packs, upload edited pack archives, and upgrade packs |
+| Fleet packs | `/m/:gid/packs`, `/m/:gid/packs/*` | GET, PUT, POST, PATCH | Read, upload, reinstall, and upgrade a pack within a specific fleet |
 | Pack export | `/packs/*/export`, `/m/:gid/packs/*/export` | GET | Export a pack, including local changes, before republishing or copying it |
 | Pack contents | `/p/*`, `/m/:gid/p/*` | GET, PATCH, POST | Read and edit pipelines, routes, and lookups; add a pipeline a fleet is missing |
 | Version control | `/version/status`, `/version/commit` | GET, POST | Check for pending changes and commit them |
@@ -130,12 +148,13 @@ The app never deletes packs, fleets, or knowledge objects. Lookup rows are only 
 
 ## External API Access
 
-This app makes **no external API calls**. It only communicates with your Cribl Leader.
+This app makes **no external API calls** and declares **no proxy hosts**. It only communicates with your Cribl Leader.
 
-### Default Configuration
+### Proxy Hosts
 
-- No external proxies configured
-- No external domains accessed
+| Host | Purpose |
+|---|---|
+| None | `config/proxies.yml` declares no external domains |
 
 ## Data and Storage
 
@@ -151,6 +170,8 @@ Each time a view loads, it reads current data from the Leader. Changes you make 
 ## Support
 
 This app is built by Nate Wood and is community-supported.
+
+For issues, feature requests, or questions, open an issue at [github.com/Cribl-Community/fleet-inheritance-manager/issues](https://github.com/Cribl-Community/fleet-inheritance-manager/issues).
 
 ## Known Limitations
 
@@ -276,7 +297,7 @@ Contributions welcome! Please:
 
 ## License
 
-License terms have not been published yet.
+This app is licensed under the [Apache License 2.0](./LICENSE).
 
 ## App Metadata
 
@@ -284,10 +305,10 @@ License terms have not been published yet.
 |---|---|
 | App Name | Fleet Inheritance Manager |
 | App ID | fleet-inheritance-manager |
-| Version | 1.0.0 |
+| Version | 1.0.1 |
 | Author | Nate Wood |
 | Support Model | community-built |
-| License | Not yet specified |
+| License | Apache-2.0 |
 | Product Tags | stream, edge |
 | Category | Administration |
 | Audience | admin, platform-owner |

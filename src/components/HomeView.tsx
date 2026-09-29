@@ -80,13 +80,13 @@ const PERMISSIONS: { area: string; paths: string; methods: string; purpose: stri
   {
     area: 'Packs',
     paths: '/packs, /packs/*',
-    methods: 'GET, PUT, PATCH, DELETE',
+    methods: 'GET, PUT, PATCH',
     purpose: 'Read packs, upload edited pack archives, and upgrade packs.',
   },
   {
     area: 'Fleet packs',
     paths: '/m/:gid/packs, /m/:gid/packs/*',
-    methods: 'GET, PUT, POST, PATCH, DELETE',
+    methods: 'GET, PUT, POST, PATCH',
     purpose: 'Read, upload, reinstall, and upgrade a pack within a specific fleet.',
   },
   {
