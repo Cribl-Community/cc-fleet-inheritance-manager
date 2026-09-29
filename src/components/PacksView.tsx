@@ -6,6 +6,7 @@ import {
   PackExportAssemblyError,
   commitConfigChanges,
   copyPackLookupFile,
+  copyPackIoObjectBetweenGroups,
   copyPackPipelineBetweenGroups,
   copyPackRoutesBetweenGroups,
   describeApiError,
@@ -14,11 +15,13 @@ import {
   fetchGroupPack,
   fetchPendingPackChanges,
   installEditedPack,
+  updatePackIoObject,
   updatePackLookupRows,
   updatePackPipeline,
   updatePackRoute,
   type ExportedPackArchive,
   type LookupRowPatch,
+  type PackIoType,
   type PendingPackChanges,
 } from '../api';
 import { nextSharedVersion, type PackMetadataEdits } from '../packArchive';
@@ -408,7 +411,7 @@ function knownPackVersions(pack: PackRelationshipSummary | null): Array<string |
   return pack ? [pack.version, ...pack.usageLocations.map((location) => location.version)] : [];
 }
 
-const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
+const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route', 'source', 'destination'] as const;
 /** Select value for publishing each fleet's own contents rather than copying one fleet's. */
 const OWN_CONTENTS_KEY = '__own-contents__';
 type KnowledgeObjectTypeFilter = (typeof KNOWLEDGE_OBJECT_TYPES)[number];
@@ -437,7 +440,7 @@ function formatInventoryDifference(difference: InventoryDifference): string {
   return `${difference.type} ${difference.name} (${reason})`;
 }
 
-/** Differences the app can fix by copying from the reference fleet (pipelines, route tables, existing CSV lookups). */
+/** Differences the app can fix by copying from the reference fleet (pipelines, route tables, sources, destinations, existing CSV lookups). */
 function isCopyableDifference(difference: InventoryDifference): boolean {
   if (difference.kind === 'extra') {
     return false;
@@ -446,9 +449,17 @@ function isCopyableDifference(difference: InventoryDifference): boolean {
   return (
     difference.type === 'pipeline' ||
     difference.type === 'route' ||
+    isPackIoType(difference.type) ||
     (difference.type === 'lookup' && difference.kind === 'differs' && /\.csv$/i.test(difference.id))
   );
 }
+
+function isPackIoType(type: string): type is PackIoType {
+  return type === 'source' || type === 'destination';
+}
+
+const PACK_IO_SECRET_NOTE =
+  'Passwords, tokens, and keys in sources and destinations are copied exactly as stored; re-enter them in the target fleet if they do not work there.';
 
 interface PackDeploymentGroup {
   key: string;
@@ -760,7 +771,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       setUpdatePackMessage(
         `This will replace "${packLabel}" in ${targets.length} fleet${targets.length === 1 ? '' : 's'} (${targetSummary}) and set all of them to version ${plannedVersion}, the next version after the latest one any fleet reports. ` +
           `${changedFields.length > 0 ? `Changing: ${changedFields.join(', ')}. ` : ''}` +
-          `${sourceTarget ? `Every other fleet's pack contents (pipelines, routes, lookups, and any local modifications) are discarded and replaced with a copy of ${sourceTarget.label}'s contents. ` : ''}` +
+          `${sourceTarget ? `Every other fleet's pack contents (pipelines, routes, lookups, sources, destinations, and any local modifications) are discarded and replaced with a copy of ${sourceTarget.label}'s contents. ` : ''}` +
           `${crossProductTargets.length > 0 ? `${crossProductTargets.map((target) => target.label).join(', ')} ${crossProductTargets.length === 1 ? 'is' : 'are'} a different product than ${sourceTarget?.label} and will be skipped. ` : ''}` +
           `${discardsLocalChanges ? 'Fleets marked "original configuration" will lose local modifications to this pack. ' : ''}` +
           `${childrenWithoutParent.length > 0 ? `${childrenWithoutParent.map((target) => `${target.label} inherits from ${target.parentLabel}`).join('; ')}, so if it has no copy of its own it is only updated by also selecting its parent. ` : ''}` +
@@ -1219,6 +1230,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
     const pipelines = copyable.filter((difference) => difference.type === 'pipeline');
     const lookups = copyable.filter((difference) => difference.type === 'lookup');
     const copyRoutes = copyable.some((difference) => difference.type === 'route');
+    const ioObjects = copyable.filter((difference) => isPackIoType(difference.type));
     const fleetNames = group.usageLocations.map((location) => location.fleetName).join(', ');
 
     if (!(groupSync?.packId === packId && groupSync.groupKey === group.key && groupSync.confirming)) {
@@ -1234,8 +1246,10 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
             ...pipelines.map((difference) => `pipeline ${difference.name}${difference.kind === 'missing' ? ' (added)' : ''}`),
             ...(copyRoutes ? ['the whole routing table'] : []),
             ...lookups.map((difference) => `lookup ${difference.name} (whole file)`),
+            ...ioObjects.map((difference) => `${difference.type} ${difference.name}${difference.kind === 'missing' ? ' (added)' : ''}`),
           ].join(', ')}. ` +
           `${notCopied.length > 0 ? `Not changed: ${notCopied.map(formatInventoryDifference).join(', ')}. ` : ''}` +
+          `${ioObjects.length > 0 ? `${PACK_IO_SECRET_NOTE} ` : ''}` +
           'This cannot be undone. Click Confirm overwrite to continue.',
       });
       return;
@@ -1269,6 +1283,18 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
       for (const difference of lookups) {
         await attempt(`lookup ${difference.name}`, () =>
           copyPackLookupFile(packId, difference.id, sourceGroupId, targetGroupId),
+        );
+      }
+      for (const difference of ioObjects) {
+        await attempt(`${difference.type} ${difference.name}`, () =>
+          copyPackIoObjectBetweenGroups(
+            packId,
+            difference.type as PackIoType,
+            difference.id,
+            sourceGroupId,
+            targetGroupId,
+            difference.kind === 'differs',
+          ),
         );
       }
 
@@ -1467,8 +1493,8 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               }}
               helperText={
                 publishSource
-                  ? `Every selected fleet gets an exact copy of ${publishSource.label}'s pack contents, replacing its own pipelines, routes, lookups, and local modifications.`
-                  : 'Each fleet keeps its own pipelines, routes, and lookups; only the metadata below changes, so fleets that differ stay different.'
+                  ? `Every selected fleet gets an exact copy of ${publishSource.label}'s pack contents, replacing its own pipelines, routes, lookups, sources, destinations, and local modifications.`
+                  : 'Each fleet keeps its own pipelines, routes, lookups, sources, and destinations; only the metadata below changes, so fleets that differ stay different.'
               }
             >
               <SelectField.Item id={OWN_CONTENTS_KEY} textValue="Keep each fleet's own contents">
@@ -2393,10 +2419,11 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                 <SkeletonLoader count={3} />
               ) : knowledgeError ? (
                 <ErrorState error={knowledgeError} onRetry={retryKnowledge} />
-              ) : visibleKnowledgeObjects.length > 0 ? (
+              ) : (
                 <>
                   <KnowledgeObjectGroups
                     knowledgeObjects={visibleKnowledgeObjects}
+                    typeFilter={knowledgeObjectTypeFilter}
                     selectedKnowledgeObjectKey={selectedKnowledgeObject ? `${selectedKnowledgeObject.type}:${selectedKnowledgeObject.id}` : null}
                     onSelectKnowledgeObject={(knowledgeObject) => setSelectedKnowledgeObject((current) => {
                       if (
@@ -2427,11 +2454,6 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                     )}
                   />
                 </>
-              ) : (
-                <EmptyState
-                  title="No knowledge objects found"
-                  description="This pack did not return lookups, pipelines, or routes."
-                />
               )}
             </div>
           </>
@@ -2757,7 +2779,8 @@ function KnowledgeObjectPreviewPanel({
     preview?.kind === 'lookup' &&
     lookupIdIndex >= 0 &&
     preview.lookup.rows.every((row) => row.length === preview.lookup.fields.length);
-  const canEdit = preview?.kind === 'pipeline' || preview?.kind === 'route' || lookupEditable;
+  const canEdit =
+    preview?.kind === 'pipeline' || preview?.kind === 'route' || preview?.kind === 'source' || preview?.kind === 'destination' || lookupEditable;
 
   const lookupPatches = useMemo((): LookupRowPatch[] => {
     if (preview?.kind !== 'lookup' || !lookupEditable) {
@@ -2807,6 +2830,8 @@ function KnowledgeObjectPreviewPanel({
       setJsonDraft(JSON.stringify(preview.pipeline.definition, null, 2));
     } else if (preview?.kind === 'route') {
       setJsonDraft(JSON.stringify(preview.route.raw, null, 2));
+    } else if (preview?.kind === 'source' || preview?.kind === 'destination') {
+      setJsonDraft(JSON.stringify(preview.definition, null, 2));
     } else if (preview?.kind === 'lookup') {
       setLookupDraft(preview.lookup.rows.map((row) => row.map(String)));
       setDeletedRowIndexes([]);
@@ -2858,6 +2883,19 @@ function KnowledgeObjectPreviewPanel({
         save = () => updatePackRoute(packId, routeId, route, groupId);
         copyTo = (targetGroupId) => updatePackRoute(packId, routeId, route, targetGroupId);
         summary = `Cribl rewrites routing table "${preview.route.tableId ?? 'default'}"; other routes in it are kept as they are now.`;
+      } else if (preview.kind === 'source' || preview.kind === 'destination') {
+        const ioType = preview.kind;
+        const definition = parseJsonObjectDraft(jsonDraft, knowledgeObject.id, ioType);
+        if (JSON.stringify(definition) === JSON.stringify(preview.definition) && copyTargets.length === 0) {
+          setMessage('No changes to save.');
+          return;
+        }
+        save = () => updatePackIoObject(packId, ioType, knowledgeObject.id, definition, groupId);
+        copyTo = (targetGroupId) => updatePackIoObject(packId, ioType, knowledgeObject.id, definition, targetGroupId);
+        summary = `Cribl replaces the whole ${ioType} with the JSON above; any field you removed is deleted.`;
+        if (copyTargets.length > 0) {
+          summary += ` ${PACK_IO_SECRET_NOTE}`;
+        }
       } else {
         if (lookupPatches.length === 0 && copyTargets.length === 0) {
           setMessage('No changes to save.');
@@ -3132,11 +3170,11 @@ function KnowledgeObjectPreviewPanel({
           ) : null}
         </div>
       ) : null}
-      {!loading && !error && isEditing && (preview?.kind === 'pipeline' || preview?.kind === 'route') ? (
+      {!loading && !error && isEditing && preview && preview.kind !== 'lookup' ? (
         <div className="preview-card">
           <label>
             <Text variant="body-xs-semibold" color="secondary">
-              {preview.kind === 'pipeline' ? 'Pipeline definition (JSON)' : 'Route definition (JSON)'}
+              {`${preview.kind.charAt(0).toUpperCase()}${preview.kind.slice(1)} definition (JSON)`}
             </Text>
             <textarea
               className="search-input preview-code-editor"
@@ -3155,6 +3193,11 @@ function KnowledgeObjectPreviewPanel({
       {!loading && !error && !isEditing && preview?.kind === 'pipeline' ? (
         <div className="preview-card">
           <pre className="preview-code">{JSON.stringify(preview.pipeline.definition, null, 2)}</pre>
+        </div>
+      ) : null}
+      {!loading && !error && !isEditing && (preview?.kind === 'source' || preview?.kind === 'destination') ? (
+        <div className="preview-card">
+          <pre className="preview-code">{JSON.stringify(preview.definition, null, 2)}</pre>
         </div>
       ) : null}
       {!loading && !error && !isEditing && preview?.kind === 'route' ? (
@@ -3183,7 +3226,7 @@ function KnowledgeObjectPreviewPanel({
       {!loading && !error && preview === null ? (
         <div className="preview-card">
           <Text variant="body-sm-normal" color="secondary">
-            Preview is available for lookups, pipelines, and routes.
+            Preview is available for lookups, pipelines, routes, sources, and destinations.
           </Text>
         </div>
       ) : null}

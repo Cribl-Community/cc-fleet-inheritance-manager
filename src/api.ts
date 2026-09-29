@@ -375,6 +375,8 @@ function sortKnowledgeObjects(items: KnowledgeObject[]): KnowledgeObject[] {
     ['lookup', 0],
     ['pipeline', 1],
     ['route', 2],
+    ['source', 3],
+    ['destination', 4],
   ]);
 
   return items.sort((left, right) => {
@@ -1175,24 +1177,30 @@ async function fetchPackRoutesForGroup(groupId: string, packId: string): Promise
   return items.flatMap((item) => mapRouteTableEntries(item, packId));
 }
 
+/** Pack sources and destinations, keyed by knowledge object type, with their pack-scoped collection path. */
+const PACK_IO_PATHS = { source: '/system/inputs', destination: '/system/outputs' } as const;
+export type PackIoType = keyof typeof PACK_IO_PATHS;
+
 async function fetchKnowledgeObjectsForBasePath(basePath: string, packId: string): Promise<KnowledgeObject[]> {
-  const [pipelines, lookups, routes] = await Promise.allSettled([
+  const results = await Promise.allSettled([
     fetchKnowledgeObjectCollection(packId, 'pipeline', `${basePath}/pipelines`),
     fetchKnowledgeObjectCollection(packId, 'lookup', `${basePath}/system/lookups`),
     fetchPackRoutesForBasePath(packId),
+    fetchKnowledgeObjectCollection(packId, 'source', `${basePath}${PACK_IO_PATHS.source}`),
+    fetchKnowledgeObjectCollection(packId, 'destination', `${basePath}${PACK_IO_PATHS.destination}`),
   ]);
 
-  const failures = [pipelines, lookups, routes].filter((result) => result.status === 'rejected');
-  if (failures.length === 3) {
+  const failures = results.filter((result) => result.status === 'rejected');
+  if (failures.length === results.length) {
     throw (failures[0] as PromiseRejectedResult).reason;
   }
 
-  return sortKnowledgeObjects([pipelines, lookups, routes].flatMap((result) =>
+  return sortKnowledgeObjects(results.flatMap((result) =>
     result.status === 'fulfilled' ? result.value : [],
   ));
 }
 
-const KNOWLEDGE_OBJECT_TYPES = ['pipeline', 'lookup', 'route'] as const;
+const KNOWLEDGE_OBJECT_TYPES = ['pipeline', 'lookup', 'route', 'source', 'destination'] as const;
 
 async function readKnowledgeObjectsForGroup(
   groupId: string,
@@ -1203,6 +1211,8 @@ async function readKnowledgeObjectsForGroup(
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'pipeline', `/p/${encodedPackId}/pipelines`),
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'lookup', `/p/${encodedPackId}/system/lookups`),
     fetchPackRoutesForGroup(groupId, packId),
+    fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'source', `/p/${encodedPackId}${PACK_IO_PATHS.source}`),
+    fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'destination', `/p/${encodedPackId}${PACK_IO_PATHS.destination}`),
   ]);
   const failedTypes = KNOWLEDGE_OBJECT_TYPES.filter((_, index) => results[index].status === 'rejected');
   const firstFailure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
@@ -1526,6 +1536,45 @@ export async function fetchKnowledgeObjectPreview(
     }
   }
 
+  if (knowledgeObject.type === 'source' || knowledgeObject.type === 'destination') {
+    const kind = knowledgeObject.type;
+    const path = `/p/${encodePathSegment(resolvedPackId)}${PACK_IO_PATHS[kind]}/${encodePathSegment(knowledgeObject.id)}`;
+    const read = async (scopeGroupId?: string): Promise<KnowledgeObjectPreview> => {
+      const payload = scopeGroupId ? await fetchGroupScopedJson(scopeGroupId, path) : await fetchJson(path);
+      const definition = getCollectionItems(payload)[0];
+
+      if (!definition) {
+        throw new ApiError(`Unexpected ${kind} response shape.`, 500, payload);
+      }
+
+      return { kind, definition };
+    };
+
+    if (groupId) {
+      for (const candidateGroupId of candidateGroupIds) {
+        try {
+          return await read(candidateGroupId);
+        } catch {
+          // Try next known group context.
+        }
+      }
+    }
+
+    try {
+      return await read();
+    } catch (globalError) {
+      for (const candidateGroupId of candidateGroupIds) {
+        try {
+          return await read(candidateGroupId);
+        } catch {
+          // Try next known group context.
+        }
+      }
+
+      throw globalError;
+    }
+  }
+
   return null;
 }
 
@@ -1555,6 +1604,20 @@ export async function updatePackPipeline(
   await patchJson(packScopedUrl(packId, `/pipelines/${encodePathSegment(pipelineId)}`, groupId), {
     ...definition,
     id: pipelineId,
+  });
+}
+
+/** Replace a source or destination inside a pack. Cribl requires the complete definition. */
+export async function updatePackIoObject(
+  packId: string,
+  type: PackIoType,
+  id: string,
+  definition: Record<string, unknown>,
+  groupId?: string,
+): Promise<void> {
+  await patchJson(packScopedUrl(packId, `${PACK_IO_PATHS[type]}/${encodePathSegment(id)}`, groupId), {
+    ...definition,
+    id,
   });
 }
 
@@ -1693,22 +1756,50 @@ export async function copyPackPipelineBetweenGroups(
   targetGroupId: string,
   targetHasPipeline: boolean,
 ): Promise<void> {
-  const path = `/pipelines/${encodePathSegment(pipelineId)}`;
+  await copyPackItemBetweenGroups(packId, '/pipelines', pipelineId, 'Pipeline', sourceGroupId, targetGroupId, targetHasPipeline);
+}
+
+/**
+ * Copy one source or destination from a pack in one group to the same pack in another group.
+ * Updates it when the target already has it, and creates it otherwise.
+ */
+export async function copyPackIoObjectBetweenGroups(
+  packId: string,
+  type: PackIoType,
+  id: string,
+  sourceGroupId: string,
+  targetGroupId: string,
+  targetHasObject: boolean,
+): Promise<void> {
+  const label = type === 'source' ? 'Source' : 'Destination';
+  await copyPackItemBetweenGroups(packId, PACK_IO_PATHS[type], id, label, sourceGroupId, targetGroupId, targetHasObject);
+}
+
+async function copyPackItemBetweenGroups(
+  packId: string,
+  collectionPath: string,
+  itemId: string,
+  label: string,
+  sourceGroupId: string,
+  targetGroupId: string,
+  targetHasItem: boolean,
+): Promise<void> {
+  const path = `${collectionPath}/${encodePathSegment(itemId)}`;
   const source = getCollectionItems(await handleResponse<unknown>(await fetch(packScopedUrl(packId, path, sourceGroupId))))[0];
 
   if (!source) {
-    throw new ApiError(`Pipeline ${pipelineId} was not found in ${sourceGroupId}.`, 404);
+    throw new ApiError(`${label} ${itemId} was not found in ${sourceGroupId}.`, 404);
   }
 
-  const definition = { ...withoutBookkeeping(source), id: pipelineId };
+  const definition = { ...withoutBookkeeping(source), id: itemId };
 
-  if (targetHasPipeline) {
+  if (targetHasItem) {
     await patchJson(packScopedUrl(packId, path, targetGroupId), definition);
     return;
   }
 
   await handleResponse<unknown>(
-    await fetch(packScopedUrl(packId, '/pipelines', targetGroupId), {
+    await fetch(packScopedUrl(packId, collectionPath, targetGroupId), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(definition),

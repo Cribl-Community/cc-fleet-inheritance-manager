@@ -32,15 +32,15 @@ const FEATURES = [
   {
     title: 'Content-identical grouping',
     detail:
-      'Fleets running a pack are grouped when their pipelines, routes, and lookup files match, with a list of what differs.',
+      'Fleets running a pack are grouped when their pipelines, routes, sources, destinations, and lookup files match, with a list of what differs.',
   },
   {
     title: 'Make identical',
-    detail: 'Copy pipelines, routes, and lookups from a reference fleet so a drifting fleet matches it again.',
+    detail: 'Copy pipelines, routes, sources, destinations, and lookups from a reference fleet so a drifting fleet matches it again.',
   },
   {
     title: 'Knowledge object editing',
-    detail: 'Edit pipelines, route entries, and lookup rows inline, and optionally apply the same change to other fleets.',
+    detail: 'Edit pipelines, route entries, sources, destinations, and lookup rows inline, and optionally apply the same change to other fleets.',
   },
   {
     title: 'Pack metadata publishing',
@@ -64,7 +64,7 @@ const STEPS = [
   'Open Fleets to confirm all expected Stream and Edge fleets are visible and to review the hierarchy.',
   'Open Packs, pick a pack, then pick the fleet you want to work in. Nothing loads until a fleet is selected.',
   'Review the content-identical groups to find fleets whose copy of the pack has drifted.',
-  'Use "Make identical to" on a drifting group, or open a pipeline, route, or lookup to edit it directly.',
+  'Use "Make identical to" on a drifting group, or open a pipeline, route, source, destination, or lookup to edit it directly.',
   'Edit pack metadata if needed, then publish. The confirmation lists every fleet and the version bump.',
   'Commit and deploy so the changes reach the fleets. Inheriting child fleets update after the deploy.',
   'Open Inheritance to verify each fleet now shows the expected local or inherited pack status.',
@@ -99,7 +99,7 @@ const PERMISSIONS: { area: string; paths: string; methods: string; purpose: stri
     area: 'Pack contents',
     paths: '/p/*, /m/:gid/p/*',
     methods: 'GET, PATCH, POST',
-    purpose: 'Read and edit pipelines, routes, and lookups; add a pipeline a fleet is missing.',
+    purpose: 'Read and edit pipelines, routes, sources, destinations, and lookups; add a pipeline, source, or destination a fleet is missing.',
   },
   {
     area: 'Version control',

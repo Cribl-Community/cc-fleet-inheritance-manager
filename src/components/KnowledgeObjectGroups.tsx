@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { Text } from '@capra/core';
 import type { KnowledgeObject } from '../types';
 
-const TYPE_ORDER = ['lookup', 'pipeline', 'route'] as const;
+const TYPE_ORDER = ['lookup', 'pipeline', 'route', 'source', 'destination'] as const;
 
 function getTypeLabel(type: string): string {
   switch (type) {
@@ -37,6 +37,8 @@ interface KnowledgeObjectGroupsProps {
   selectedKnowledgeObjectKey?: string | null;
   onSelectKnowledgeObject?: (knowledgeObject: KnowledgeObject) => void;
   renderPreview?: (knowledgeObject: KnowledgeObject) => ReactNode;
+  /** Type filter in use ('all' or one type); matching groups are shown even when empty. */
+  typeFilter?: string;
 }
 
 export function KnowledgeObjectGroups({
@@ -45,11 +47,13 @@ export function KnowledgeObjectGroups({
   selectedKnowledgeObjectKey,
   onSelectKnowledgeObject,
   renderPreview,
+  typeFilter,
 }: KnowledgeObjectGroupsProps) {
   const [expandedTypes, setExpandedTypes] = useState<Set<string>>(new Set());
 
   const groups = useMemo(() => {
-    const byType = new Map<string, KnowledgeObject[]>();
+    const typesToShow: readonly string[] = typeFilter === 'all' ? TYPE_ORDER : typeFilter ? [typeFilter] : [];
+    const byType = new Map<string, KnowledgeObject[]>(typesToShow.map((type) => [type, []]));
 
     knowledgeObjects.forEach((knowledgeObject) => {
       const current = byType.get(knowledgeObject.type) ?? [];
@@ -64,7 +68,7 @@ export function KnowledgeObjectGroups({
         label: getTypeLabel(type),
         items,
       }));
-  }, [knowledgeObjects]);
+  }, [knowledgeObjects, typeFilter]);
 
   const toggleType = (type: string) => {
     const nextExpanded = new Set(expandedTypes);
@@ -79,7 +83,7 @@ export function KnowledgeObjectGroups({
   };
 
   const canPreview = (knowledgeObject: KnowledgeObject) =>
-    knowledgeObject.type === 'lookup' || knowledgeObject.type === 'pipeline' || knowledgeObject.type === 'route';
+    (TYPE_ORDER as readonly string[]).includes(knowledgeObject.type);
 
   return (
     <div className="knowledge-group-list">
@@ -108,6 +112,11 @@ export function KnowledgeObjectGroups({
 
             {isExpanded ? (
               <div className="tree-children tree-children-leaf knowledge-group-items">
+                {group.items.length === 0 ? (
+                  <Text variant="body-xs-normal" color="secondary">
+                    No {group.label.toLowerCase()} in this pack
+                  </Text>
+                ) : null}
                 {group.items.map((knowledgeObject) => {
                   const selectedKey = `${knowledgeObject.type}:${knowledgeObject.id}`;
                   const isSelected = selectedKnowledgeObjectKey === selectedKey;

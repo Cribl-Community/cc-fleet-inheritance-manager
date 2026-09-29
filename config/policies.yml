@@ -38,7 +38,7 @@ policies:
   - object: '/master/groups/*/deploy'
     actions: ['PATCH']
 
-  # Knowledge objects within packs (PATCH to edit pipelines, routes, and lookup rows; POST to add a pipeline a fleet is missing)
+  # Knowledge objects within packs (PATCH to edit pipelines, routes, sources, destinations, and lookup rows; POST to add a pipeline, source, or destination a fleet is missing)
   - object: '/p/*'
     actions: ['GET', 'PATCH']
   - object: '/m/:gid/p/*'

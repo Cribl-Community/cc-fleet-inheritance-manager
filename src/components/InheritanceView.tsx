@@ -7,7 +7,7 @@ import { FleetProductBadge } from './FleetProductBadge';
 import { KnowledgeObjectGroups } from './KnowledgeObjectGroups';
 import { EmptyState, SkeletonLoader } from './LoadingState';
 
-const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
+const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route', 'source', 'destination'] as const;
 const INHERITANCE_CHART_MODES = ['tree', 'levels', 'paths', 'sankey'] as const;
 type KnowledgeObjectTypeFilter = (typeof KNOWLEDGE_OBJECT_TYPES)[number];
 type KnowledgeObjectSortMode = 'name-asc' | 'name-desc';
@@ -1257,20 +1257,11 @@ function PackKnowledgeObjectsList({
     return <ErrorState error={error} onRetry={retry} />;
   }
 
-  if (!knowledgeObjects || knowledgeObjects.length === 0) {
-    return (
-      <div className="tree-children tree-children-leaf">
-        <Text variant="body-xs-normal" color="secondary">
-          No knowledge objects
-        </Text>
-      </div>
-    );
-  }
-
   return (
     <div className="tree-children tree-children-leaf">
       <KnowledgeObjectGroups
         knowledgeObjects={visibleKnowledgeObjects}
+        typeFilter={knowledgeObjectTypeFilter}
         variant="tree"
         selectedKnowledgeObjectKey={selectedKnowledgeObject ? `${selectedKnowledgeObject.type}:${selectedKnowledgeObject.id}` : null}
         onSelectKnowledgeObject={(knowledgeObject) => setSelectedKnowledgeObject((current) => {
@@ -1315,6 +1306,9 @@ function PackKnowledgeObjectsList({
             ) : null}
             {!previewLoading && !previewError && preview?.kind === 'pipeline' ? (
               <pre className="preview-code">{JSON.stringify(preview.pipeline.definition, null, 2)}</pre>
+            ) : null}
+            {!previewLoading && !previewError && (preview?.kind === 'source' || preview?.kind === 'destination') ? (
+              <pre className="preview-code">{JSON.stringify(preview.definition, null, 2)}</pre>
             ) : null}
             {!previewLoading && !previewError && preview?.kind === 'route' ? (
               <div className="preview-table-wrap">

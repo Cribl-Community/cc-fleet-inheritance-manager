@@ -118,6 +118,10 @@ export type KnowledgeObjectPreview =
   | {
       kind: 'route';
       route: RouteContentPreview;
+    }
+  | {
+      kind: 'source' | 'destination';
+      definition: Record<string, unknown>;
     };
 
 export interface InheritanceRelation {

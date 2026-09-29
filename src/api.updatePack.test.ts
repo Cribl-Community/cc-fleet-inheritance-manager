@@ -612,6 +612,43 @@ test('copyPackPipelineBetweenGroups and copyPackRoutesBetweenGroups write the so
   }
 });
 
+test('copyPackIoObjectBetweenGroups copies sources and destinations to the target', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ method: string; url: string; body?: string }> = [];
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    calls.push({ method, url, body: init?.body ? String(init.body) : undefined });
+
+    if (method === 'GET' && url.endsWith('/system/inputs/in_syslog')) {
+      return new Response(JSON.stringify({ items: [{ id: 'in_syslog', type: 'syslog', port: 514, __srcGroup: 'source-group' }] }), { status: 200 });
+    }
+
+    if (method === 'GET' && url.endsWith('/system/outputs/out_s3')) {
+      return new Response(JSON.stringify({ items: [{ id: 'out_s3', type: 's3', bucket: 'logs' }] }), { status: 200 });
+    }
+
+    return new Response(JSON.stringify({ items: [] }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    await api.copyPackIoObjectBetweenGroups('demo-pack', 'source', 'in_syslog', 'source-group', 'target-group', false);
+    await api.copyPackIoObjectBetweenGroups('demo-pack', 'destination', 'out_s3', 'source-group', 'target-group', true);
+
+    assert.deepEqual(calls.map(({ method, url }) => `${method} ${url}`), [
+      'GET /api/v1/m/source-group/p/demo-pack/system/inputs/in_syslog',
+      'POST /api/v1/m/target-group/p/demo-pack/system/inputs',
+      'GET /api/v1/m/source-group/p/demo-pack/system/outputs/out_s3',
+      'PATCH /api/v1/m/target-group/p/demo-pack/system/outputs/out_s3',
+    ]);
+    assert.deepEqual(JSON.parse(calls[1].body ?? '{}'), { id: 'in_syslog', type: 'syslog', port: 514 });
+    assert.deepEqual(JSON.parse(calls[3].body ?? '{}'), { id: 'out_s3', type: 's3', bucket: 'logs' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('isReusablePackSource accepts uploaded .crbl source names created by the API', () => {
   assert.equal(isReusablePackSource('cribl_splunk_forwarder_windows_classic_events_to_json.crbl'), true);
   assert.equal(isReusablePackSource('https://example.com/demo.crbl'), true);
