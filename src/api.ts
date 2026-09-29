@@ -327,7 +327,7 @@ function mapPack(item: ApiRecord, groupId?: string): Pack {
 
 /**
  * The part of a list item that defines the object's content. Per-fleet metadata (lookup description, tags and
- * mode; function load details) is left out so fleets with identical contents fingerprint the same.
+ * mode) is left out so fleets with identical contents fingerprint the same.
  */
 function knowledgeObjectContent(item: ApiRecord, type: KnowledgeObject['type']): unknown {
   if (type === 'pipeline') {
@@ -337,10 +337,6 @@ function knowledgeObjectContent(item: ApiRecord, type: KnowledgeObject['type']):
   if (type === 'lookup') {
     const fileInfo = isRecord(item.fileInfo) ? item.fileInfo : undefined;
     return { size: item.size ?? fileInfo?.size ?? null };
-  }
-
-  if (type === 'function') {
-    return { id: item.id ?? item.name ?? null };
   }
 
   return item;
@@ -379,7 +375,6 @@ function sortKnowledgeObjects(items: KnowledgeObject[]): KnowledgeObject[] {
     ['lookup', 0],
     ['pipeline', 1],
     ['route', 2],
-    ['function', 3],
   ]);
 
   return items.sort((left, right) => {
@@ -1153,24 +1148,23 @@ async function fetchPackRoutesForGroup(groupId: string, packId: string): Promise
 }
 
 async function fetchKnowledgeObjectsForBasePath(basePath: string, packId: string): Promise<KnowledgeObject[]> {
-  const [functions, pipelines, lookups, routes] = await Promise.allSettled([
-    fetchKnowledgeObjectCollection(packId, 'function', `${basePath}/functions?showHidden=true`),
+  const [pipelines, lookups, routes] = await Promise.allSettled([
     fetchKnowledgeObjectCollection(packId, 'pipeline', `${basePath}/pipelines`),
     fetchKnowledgeObjectCollection(packId, 'lookup', `${basePath}/system/lookups`),
     fetchPackRoutesForBasePath(packId),
   ]);
 
-  const failures = [functions, pipelines, lookups, routes].filter((result) => result.status === 'rejected');
-  if (failures.length === 4) {
+  const failures = [pipelines, lookups, routes].filter((result) => result.status === 'rejected');
+  if (failures.length === 3) {
     throw (failures[0] as PromiseRejectedResult).reason;
   }
 
-  return sortKnowledgeObjects([functions, pipelines, lookups, routes].flatMap((result) =>
+  return sortKnowledgeObjects([pipelines, lookups, routes].flatMap((result) =>
     result.status === 'fulfilled' ? result.value : [],
   ));
 }
 
-const KNOWLEDGE_OBJECT_TYPES = ['function', 'pipeline', 'lookup', 'route'] as const;
+const KNOWLEDGE_OBJECT_TYPES = ['pipeline', 'lookup', 'route'] as const;
 
 async function readKnowledgeObjectsForGroup(
   groupId: string,
@@ -1178,7 +1172,6 @@ async function readKnowledgeObjectsForGroup(
 ): Promise<{ objects: KnowledgeObject[]; failedTypes: string[]; firstError?: unknown }> {
   const encodedPackId = encodePathSegment(packId);
   const results = await Promise.allSettled([
-    fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'function', `/p/${encodedPackId}/functions?showHidden=true`),
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'pipeline', `/p/${encodedPackId}/pipelines`),
     fetchGroupScopedKnowledgeObjectCollection(groupId, packId, 'lookup', `/p/${encodedPackId}/system/lookups`),
     fetchPackRoutesForGroup(groupId, packId),

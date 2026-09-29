@@ -78,6 +78,9 @@ interface PackPublishTarget {
 interface KnowledgeObjectCopyTarget {
   groupId: string;
   label: string;
+  product?: FleetProduct;
+  /** Fleets that inherit the pack from this one. */
+  inheritedBy: string[];
   /** The fleet's inventory was read and does not contain this object. */
   missing: boolean;
 }
@@ -138,6 +141,150 @@ interface PackPublishResult {
   message: string;
   /** Version this fleet is expected to end up on (installed directly or inherited). */
   expectedVersion?: string;
+}
+
+interface FleetTransferOption {
+  id: string;
+  label: string;
+  product?: FleetProduct;
+  /** Shown instead of the detail text, and the fleet cannot be moved. */
+  disabledReason?: string;
+  /** Secondary text for the fleet, depending on whether it is in the chosen list. */
+  detail?: (isChosen: boolean) => string;
+}
+
+/** Two-list fleet picker: highlight fleets, then move them between Available and the chosen list. */
+function FleetTransferList({
+  options,
+  selectedIds,
+  onChange,
+  disabled = false,
+  chosenTitle,
+}: {
+  options: FleetTransferOption[];
+  selectedIds: string[];
+  onChange: (selectedIds: string[]) => void;
+  disabled?: boolean;
+  chosenTitle: string;
+}) {
+  const [highlightedIds, setHighlightedIds] = useState<string[]>([]);
+  const available = options.filter((option) => !selectedIds.includes(option.id));
+  const chosen = options.filter((option) => selectedIds.includes(option.id));
+  const movable = (option: FleetTransferOption) => !option.disabledReason;
+  const highlightedAvailableIds = available.filter(movable).map((option) => option.id).filter((id) => highlightedIds.includes(id));
+  const highlightedChosenIds = chosen.map((option) => option.id).filter((id) => highlightedIds.includes(id));
+  const move = (ids: string[], direction: 'add' | 'remove') => {
+    onChange(
+      direction === 'add'
+        ? [...selectedIds, ...ids.filter((id) => !selectedIds.includes(id))]
+        : selectedIds.filter((id) => !ids.includes(id)),
+    );
+    setHighlightedIds((current) => current.filter((id) => !ids.includes(id)));
+  };
+  const renderItem = (option: FleetTransferOption, isChosen: boolean) => {
+    const isHighlighted = highlightedIds.includes(option.id);
+    const isDisabled = disabled || !movable(option);
+    const detail = option.disabledReason ?? option.detail?.(isChosen);
+
+    return (
+      <li key={option.id}>
+        <button
+          type="button"
+          className={`fleet-transfer-item${isHighlighted ? ' fleet-transfer-item-highlighted' : ''}`}
+          aria-pressed={isHighlighted}
+          disabled={isDisabled}
+          onClick={() =>
+            setHighlightedIds((current) =>
+              current.includes(option.id) ? current.filter((id) => id !== option.id) : [...current, option.id],
+            )
+          }
+          onDoubleClick={() => move([option.id], isChosen ? 'remove' : 'add')}
+        >
+          <span className="list-card-header">
+            <Text variant="body-sm-semibold">{option.label}</Text>
+            {option.product ? <FleetProductBadge product={option.product} /> : null}
+          </span>
+          {detail ? (
+            <Text variant="body-xs-normal" color="secondary">
+              {detail}
+            </Text>
+          ) : null}
+        </button>
+      </li>
+    );
+  };
+
+  return (
+    <>
+      <Text variant="body-xs-normal" color="secondary">
+        Click fleets to highlight them, then use the arrows to move them. Double-click moves a fleet directly.
+      </Text>
+      <div className="fleet-transfer">
+        <div className="fleet-transfer-list">
+          <Text variant="body-xs-semibold" color="secondary">
+            Available ({available.length})
+          </Text>
+          <ul className="fleet-transfer-items" aria-label="Available fleets">
+            {available.length > 0 ? (
+              available.map((option) => renderItem(option, false))
+            ) : (
+              <li className="fleet-transfer-empty">
+                <Text variant="body-xs-normal" color="secondary">
+                  All fleets are selected.
+                </Text>
+              </li>
+            )}
+          </ul>
+        </div>
+        <div className="fleet-transfer-controls">
+          <IconButton
+            icon={ArrowRight}
+            aria-label={`Add ${highlightedAvailableIds.length || ''} highlighted fleet${highlightedAvailableIds.length === 1 ? '' : 's'} to ${chosenTitle}`}
+            onClick={() => move(highlightedAvailableIds, 'add')}
+            disabled={disabled || highlightedAvailableIds.length === 0}
+          />
+          <IconButton
+            icon={ArrowLeft}
+            aria-label={`Remove ${highlightedChosenIds.length || ''} highlighted fleet${highlightedChosenIds.length === 1 ? '' : 's'} from ${chosenTitle}`}
+            onClick={() => move(highlightedChosenIds, 'remove')}
+            disabled={disabled || highlightedChosenIds.length === 0}
+          />
+          <button
+            type="button"
+            className="pill pill-subtle"
+            onClick={() => move(available.filter(movable).map((option) => option.id), 'add')}
+            disabled={disabled || !available.some(movable)}
+          >
+            Add all
+          </button>
+          <button
+            type="button"
+            className="pill pill-subtle"
+            onClick={() => move(selectedIds, 'remove')}
+            disabled={disabled || chosen.length === 0}
+          >
+            Remove all
+          </button>
+        </div>
+        <div className="fleet-transfer-list">
+          <Text variant="body-xs-semibold" color="secondary">
+            {chosenTitle} ({chosen.length})
+          </Text>
+          <ul className="fleet-transfer-items" aria-label={chosenTitle}>
+            {chosen.length > 0 ? (
+              chosen.map((option) => renderItem(option, true))
+            ) : (
+              <li className="fleet-transfer-empty">
+                <Text variant="body-xs-normal" color="secondary">
+                  No fleets selected.
+                </Text>
+              </li>
+            )}
+          </ul>
+        </div>
+      </div>
+    </>
+  );
 }
 
 /** Order an inheritance tree of fleets depth-first (parents before children) and record each fleet's depth. */
@@ -264,43 +411,10 @@ function knownPackVersions(pack: PackRelationshipSummary | null): Array<string |
 const KNOWLEDGE_OBJECT_TYPES = ['all', 'lookup', 'pipeline', 'route'] as const;
 /** Select value for publishing each fleet's own contents rather than copying one fleet's. */
 const OWN_CONTENTS_KEY = '__own-contents__';
-const PACK_VIEW_MODES = ['catalog', 'sankey'] as const;
-const PACK_SANKEY_COLUMN_WIDTH = 220;
-const PACK_SANKEY_COLUMN_GAP = 84;
-const PACK_SANKEY_NODE_HEIGHT = 72;
-const PACK_SANKEY_NODE_GAP = 18;
-const PACK_SANKEY_PADDING = 24;
 type KnowledgeObjectTypeFilter = (typeof KNOWLEDGE_OBJECT_TYPES)[number];
-type PackViewMode = (typeof PACK_VIEW_MODES)[number];
 type FleetProductFilter = 'all' | FleetProduct;
 
 type KnowledgeObjectSortMode = 'name-asc' | 'name-desc';
-
-interface PackSankeyNode {
-  key: string;
-  column: 'fleets' | 'packs' | 'references';
-  label: string;
-  subtitle: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  packId?: string;
-}
-
-interface PackSankeyLink {
-  key: string;
-  path: string;
-  title: string;
-  kind: 'usage' | 'reference';
-}
-
-interface PackSankeyLayout {
-  nodes: PackSankeyNode[];
-  links: PackSankeyLink[];
-  width: number;
-  height: number;
-}
 
 interface InventoryDifference {
   type: KnowledgeObject['type'];
@@ -378,7 +492,6 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
   const isActionBarLayout = layout === 'action-bar';
   const { data: packs, loading, error, retry } = usePackRelationshipSummaries();
   const [searchTerm, setSearchTerm] = useState('');
-  const [viewMode, setViewMode] = useState<PackViewMode>('catalog');
   const [productFilter, setProductFilter] = useState<FleetProductFilter>('all');
   const [selectedPackId, setSelectedPackId] = useState<string | null>(null);
   const [selectedUsageContextKey, setSelectedUsageContextKey] = useState<string | null>(null);
@@ -390,7 +503,6 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
   const [publishGroupIds, setPublishGroupIds] = useState<string[]>([]);
   /** When set, every selected fleet gets this fleet's pack contents instead of keeping its own. */
   const [publishSourceGroupId, setPublishSourceGroupId] = useState<string | null>(null);
-  const [highlightedTargetIds, setHighlightedTargetIds] = useState<string[]>([]);
   const [publishResults, setPublishResults] = useState<{ packId: string; items: PackPublishResult[] } | null>(null);
   const [deployPlan, setDeployPlan] = useState<{ packId: string; targets: PackDeployTarget[] } | null>(null);
   const [pendingChanges, setPendingChanges] = useState<PendingPackChanges | null>(null);
@@ -452,11 +564,14 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
     () =>
       visibleUsageLocations.find(
         (usageLocation) => `${usageLocation.product}:${usageLocation.fleetId}` === selectedUsageContextKey,
-      ) ?? visibleUsageLocations[0] ?? null,
+      ) ?? null,
     [selectedUsageContextKey, visibleUsageLocations],
   );
   const fleetTreeOptions = useMemo(() => buildFleetTreeOptions(visibleUsageLocations), [visibleUsageLocations]);
   const selectedGroupId = selectedUsageLocation?.fleetId;
+  /** The pack is deployed to fleets but the user has not picked which one to view yet. */
+  const needsFleetSelection = visibleUsageLocations.length > 0 && !selectedUsageLocation;
+  const fleetScopedPackId = needsFleetSelection ? null : selectedPackId;
   const selectedPackGroupId = selectedUsageLocation?.inheritedFrom ?? selectedGroupId ?? selectedPack?.groupIds?.[0];
   const publishTargets = useMemo(() => buildPublishTargets(selectedPack), [selectedPack]);
   const plannedVersion = useMemo(() => describeSharedVersion(knownPackVersions(selectedPack)), [selectedPack]);
@@ -465,7 +580,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
     loading: koLoading,
     error: knowledgeError,
     retry: retryKnowledge,
-  } = usePackKnowledgeObjects(selectedPackId, selectedGroupId);
+  } = usePackKnowledgeObjects(fleetScopedPackId, selectedGroupId);
   const [selectedKnowledgeObject, setSelectedKnowledgeObject] = useState<KnowledgeObject | null>(null);
   const [knowledgeObjectTypeFilter, setKnowledgeObjectTypeFilter] = useState<KnowledgeObjectTypeFilter>('all');
   const [knowledgeObjectSortMode, setKnowledgeObjectSortMode] = useState<KnowledgeObjectSortMode>('name-asc');
@@ -474,12 +589,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
     loading: previewLoading,
     error: previewError,
     retry: retryPreview,
-  } = useKnowledgeObjectPreview(selectedPackId, selectedKnowledgeObject, selectedGroupId);
-
-  const sankeyLayout = useMemo(
-    () => buildPackSankeyLayout(filteredPacks, productFilter),
-    [filteredPacks, productFilter],
-  );
+  } = useKnowledgeObjectPreview(fleetScopedPackId, selectedKnowledgeObject, selectedGroupId);
 
   const summaryFleetCount = useMemo(() => {
     const fleetKeys = new Set<string>();
@@ -559,21 +669,20 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
     setIsConfirmingDeploy(false);
     setPendingChanges(null);
 
-    if (visibleUsageLocations.length === 0) {
-      setSelectedUsageContextKey(null);
-      return;
-    }
-
+    // Never pick a fleet on the user's behalf; only drop a selection that no longer applies.
     const currentKey = selectedUsageContextKey;
-    const hasCurrent = currentKey
-      ? visibleUsageLocations.some((usageLocation) => `${usageLocation.product}:${usageLocation.fleetId}` === currentKey)
-      : false;
-
-    if (!hasCurrent) {
-      const defaultUsageLocation = visibleUsageLocations[0];
-      setSelectedUsageContextKey(`${defaultUsageLocation.product}:${defaultUsageLocation.fleetId}`);
+    if (
+      currentKey &&
+      !visibleUsageLocations.some((usageLocation) => `${usageLocation.product}:${usageLocation.fleetId}` === currentKey)
+    ) {
+      setSelectedUsageContextKey(null);
     }
   }, [selectedPack, selectedUsageContextKey, visibleUsageLocations]);
+
+  useEffect(() => {
+    // Each pack click starts with no fleet chosen so the user always picks the one they are looking at.
+    setSelectedUsageContextKey(null);
+  }, [selectedPackId]);
 
   const packEdits = useMemo((): PackMetadataEdits => {
     if (!selectedPack || !packDraft) {
@@ -1200,7 +1309,9 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
 
         return {
           groupId: target.groupId,
-          label: `${target.label}${target.inheritingFleets.length > 0 ? ` (also inherited by ${target.inheritingFleets.map((child) => child.label).join(', ')})` : ''}`,
+          label: target.label,
+          product: target.product,
+          inheritedBy: target.inheritingFleets.map((child) => child.label),
           missing:
             complete &&
             !inventory.objects.some((candidate) => candidate.type === knowledgeObject.type && candidate.id === knowledgeObject.id),
@@ -1312,64 +1423,29 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
     ? publishTargets.find((target) => target.groupId === publishSourceGroupId)
     : undefined;
 
-  const availableTargets = publishTargets.filter((target) => !publishGroupIds.includes(target.groupId));
-  const chosenTargets = publishTargets.filter((target) => publishGroupIds.includes(target.groupId));
-  const highlightedAvailableIds = availableTargets
-    .map((target) => target.groupId)
-    .filter((groupId) => highlightedTargetIds.includes(groupId));
-  const highlightedChosenIds = chosenTargets
-    .map((target) => target.groupId)
-    .filter((groupId) => highlightedTargetIds.includes(groupId));
-  const moveTargets = (groupIds: string[], direction: 'add' | 'remove') => {
-    setPublishTargetSelection(
-      direction === 'add'
-        ? [...publishGroupIds, ...groupIds.filter((groupId) => !publishGroupIds.includes(groupId))]
-        : publishGroupIds.filter((groupId) => !groupIds.includes(groupId)),
-    );
-    setHighlightedTargetIds((current) => current.filter((groupId) => !groupIds.includes(groupId)));
-  };
-  const renderTransferItem = (target: PackPublishTarget, isChosen: boolean) => {
-    const isHighlighted = highlightedTargetIds.includes(target.groupId);
-    const usesOriginalConfig = originalConfigGroupIds.includes(target.groupId);
-
-    return (
-      <li key={target.groupId}>
-        <button
-          type="button"
-          className={`fleet-transfer-item${isHighlighted ? ' fleet-transfer-item-highlighted' : ''}`}
-          aria-pressed={isHighlighted}
-          onClick={() =>
-            setHighlightedTargetIds((current) =>
-              current.includes(target.groupId)
-                ? current.filter((groupId) => groupId !== target.groupId)
-                : [...current, target.groupId],
-            )
-          }
-          onDoubleClick={() => moveTargets([target.groupId], isChosen ? 'remove' : 'add')}
-        >
-          <span className="list-card-header">
-            <Text variant="body-sm-semibold">{target.label}</Text>
-            {target.product ? <FleetProductBadge product={target.product} /> : null}
-          </span>
-          <Text variant="body-xs-normal" color="secondary">
-            {isChosen
-              ? `${target.version ?? 'Unknown version'} → ${target.parentGroupId ? `${plannedVersion} (via ${target.parentLabel})` : plannedVersion}`
-              : target.version ?? 'Unknown version'}
-            {isChosen && target.inheritingFleets.length > 0
-              ? ` · Also inherited by: ${target.inheritingFleets.map((child) => child.label).join(', ')}`
-              : ''}
-            {target.parentLabel ? ` · Inherits from ${target.parentLabel}` : ''}
-            {isChosen && usesOriginalConfig ? ' · Will publish from original configuration (local modifications discarded)' : ''}
-            {isChosen && publishSource
-              ? target.groupId === publishSource.groupId
-                ? ' · Source of the contents'
-                : ` · Contents replaced with a copy of ${publishSource.label}`
-              : ''}
-          </Text>
-        </button>
-      </li>
-    );
-  };
+  const publishTransferOptions: FleetTransferOption[] = publishTargets.map((target) => ({
+    id: target.groupId,
+    label: target.label,
+    product: target.product,
+    detail: (isChosen) =>
+      [
+        isChosen
+          ? `${target.version ?? 'Unknown version'} → ${target.parentGroupId ? `${plannedVersion} (via ${target.parentLabel})` : plannedVersion}`
+          : target.version ?? 'Unknown version',
+        isChosen && target.inheritingFleets.length > 0
+          ? `Also inherited by: ${target.inheritingFleets.map((child) => child.label).join(', ')}`
+          : '',
+        target.parentLabel ? `Inherits from ${target.parentLabel}` : '',
+        isChosen && originalConfigGroupIds.includes(target.groupId)
+          ? 'Will publish from original configuration (local modifications discarded)'
+          : '',
+        isChosen && publishSource
+          ? target.groupId === publishSource.groupId
+            ? 'Source of the contents'
+            : `Contents replaced with a copy of ${publishSource.label}`
+          : '',
+      ].filter(Boolean).join(' · '),
+  }));
 
   const editForm = selectedPack && isEditingPack && packDraft ? (
     <div className="detail-section" style={{ marginTop: '1rem' }}>
@@ -1417,75 +1493,13 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               No fleets with this pack installed were found.
             </Text>
           ) : (
-            <>
-              <Text variant="body-xs-normal" color="secondary">
-                Click fleets to highlight them, then use the arrows to move them. Double-click moves a fleet directly.
-              </Text>
-              <div className="fleet-transfer">
-                <div className="fleet-transfer-list">
-                  <Text variant="body-xs-semibold" color="secondary">
-                    Available ({availableTargets.length})
-                  </Text>
-                  <ul className="fleet-transfer-items" aria-label="Available fleets">
-                    {availableTargets.length > 0 ? (
-                      availableTargets.map((target) => renderTransferItem(target, false))
-                    ) : (
-                      <li className="fleet-transfer-empty">
-                        <Text variant="body-xs-normal" color="secondary">
-                          All fleets are selected.
-                        </Text>
-                      </li>
-                    )}
-                  </ul>
-                </div>
-                <div className="fleet-transfer-controls">
-                  <IconButton
-                    icon={ArrowRight}
-                    aria-label={`Add ${highlightedAvailableIds.length || ''} highlighted fleet${highlightedAvailableIds.length === 1 ? '' : 's'} to the update`}
-                    onClick={() => moveTargets(highlightedAvailableIds, 'add')}
-                    disabled={isPackBusy || highlightedAvailableIds.length === 0}
-                  />
-                  <IconButton
-                    icon={ArrowLeft}
-                    aria-label={`Remove ${highlightedChosenIds.length || ''} highlighted fleet${highlightedChosenIds.length === 1 ? '' : 's'} from the update`}
-                    onClick={() => moveTargets(highlightedChosenIds, 'remove')}
-                    disabled={isPackBusy || highlightedChosenIds.length === 0}
-                  />
-                  <button
-                    type="button"
-                    className="pill pill-subtle"
-                    onClick={() => moveTargets(publishTargets.map((target) => target.groupId), 'add')}
-                    disabled={availableTargets.length === 0}
-                  >
-                    Add all
-                  </button>
-                  <button
-                    type="button"
-                    className="pill pill-subtle"
-                    onClick={() => moveTargets(publishGroupIds, 'remove')}
-                    disabled={chosenTargets.length === 0}
-                  >
-                    Remove all
-                  </button>
-                </div>
-                <div className="fleet-transfer-list">
-                  <Text variant="body-xs-semibold" color="secondary">
-                    Fleets to update ({chosenTargets.length})
-                  </Text>
-                  <ul className="fleet-transfer-items" aria-label="Fleets to update">
-                    {chosenTargets.length > 0 ? (
-                      chosenTargets.map((target) => renderTransferItem(target, true))
-                    ) : (
-                      <li className="fleet-transfer-empty">
-                        <Text variant="body-xs-normal" color="secondary">
-                          No fleets selected.
-                        </Text>
-                      </li>
-                    )}
-                  </ul>
-                </div>
-              </div>
-            </>
+            <FleetTransferList
+              options={publishTransferOptions}
+              selectedIds={publishGroupIds}
+              onChange={setPublishTargetSelection}
+              disabled={isPackBusy}
+              chosenTitle="Fleets to update"
+            />
           )}
         </fieldset>
         <label className="metadata-row">
@@ -1614,6 +1628,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                 layout="horizontal"
                 size="sm"
                 value={selectedUsageContextKey}
+                placeholder="Select a fleet"
                 onChange={(key) => {
                   if (key !== null) {
                     setSelectedUsageContextKey(String(key));
@@ -1754,30 +1769,6 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
 
         <div style={{ marginBottom: '0.75rem' }}>
           <Text variant="body-xs-semibold" color="secondary">
-            View mode
-          </Text>
-          <div className="pill-row" style={{ marginTop: '0.35rem' }}>
-            {PACK_VIEW_MODES.map((mode) => {
-              const isSelected = viewMode === mode;
-              const label = mode === 'catalog' ? 'Catalog' : 'Sankey chart';
-
-              return (
-                <button
-                  key={mode}
-                  type="button"
-                  className={`pill${isSelected ? '' : ' pill-subtle'}`}
-                  onClick={() => setViewMode(mode)}
-                  aria-pressed={isSelected}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div style={{ marginBottom: '0.75rem' }}>
-          <Text variant="body-xs-semibold" color="secondary">
             Fleet product
           </Text>
           <div className="pill-row" style={{ marginTop: '0.35rem' }}>
@@ -1833,14 +1824,6 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               {summaryReferenceCount}
             </Text>
           </div>
-          <div className="inheritance-summary-card">
-            <Text variant="body-xs-semibold" color="secondary">
-              Active chart
-            </Text>
-            <Text as="div" variant="heading-sm">
-              {viewMode === 'catalog' ? 'Catalog' : 'Sankey chart'}
-            </Text>
-          </div>
         </div>
 
         {filteredPacks.length === 0 ? (
@@ -1848,7 +1831,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
             title="No packs match this filter"
             description="Try a different pack name, fleet product, or reference search."
           />
-        ) : viewMode === 'catalog' ? (
+        ) : (
           <div className="list-stack list-stack-scroll">
             {filteredPacks.map((pack) => {
               const inheritanceLabel =
@@ -1906,12 +1889,6 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               );
             })}
           </div>
-        ) : (
-          <PackRelationshipSankeyChart
-            layout={sankeyLayout}
-            selectedPackId={selectedPack?.id ?? null}
-            onSelectPack={requestPackSelection}
-          />
         )}
       </div>
 
@@ -1946,6 +1923,26 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               <Text as="h3" variant="heading-sm">
                 Viewing deployment
               </Text>
+              {!isActionBarLayout && visibleUsageLocations.length > 0 ? (
+                <div className="pill-row" style={{ marginTop: '0.75rem' }}>
+                  {visibleUsageLocations.map((usageLocation) => {
+                    const usageKey = `${usageLocation.product}:${usageLocation.fleetId}`;
+                    const isSelected = usageKey === selectedUsageContextKey;
+
+                    return (
+                      <button
+                        key={usageKey}
+                        type="button"
+                        className={`pill${isSelected ? '' : ' pill-subtle'}`}
+                        onClick={() => setSelectedUsageContextKey(usageKey)}
+                        aria-pressed={isSelected}
+                      >
+                        {usageLocation.fleetName}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
               {selectedUsageLocation ? (
                 <>
                   <div className="section-copy">
@@ -1953,26 +1950,6 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                       You are viewing the pack as deployed in {selectedUsageLocation.fleetName}. Pack content can differ across fleets even when the version matches.
                     </Text>
                   </div>
-                  {!isActionBarLayout ? (
-                  <div className="pill-row" style={{ marginTop: '0.75rem' }}>
-                    {visibleUsageLocations.map((usageLocation) => {
-                      const usageKey = `${usageLocation.product}:${usageLocation.fleetId}`;
-                      const isSelected = usageKey === selectedUsageContextKey;
-
-                      return (
-                        <button
-                          key={usageKey}
-                          type="button"
-                          className={`pill${isSelected ? '' : ' pill-subtle'}`}
-                          onClick={() => setSelectedUsageContextKey(usageKey)}
-                          aria-pressed={isSelected}
-                        >
-                          {usageLocation.fleetName}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  ) : null}
 
                   <div className="metadata-grid" style={{ marginTop: '1rem' }}>
                     <div className="metadata-row">
@@ -2056,7 +2033,9 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               ) : (
                 <div className="section-copy">
                   <Text variant="body-sm-normal" color="secondary">
-                    No fleet-scoped deployment is available for the current filter.
+                    {needsFleetSelection
+                      ? `Select a fleet ${isActionBarLayout ? 'in "Viewing fleet" above' : 'above'} to see this pack as deployed there.`
+                      : 'No fleet-scoped deployment is available for the current filter.'}
                   </Text>
                 </div>
               )}
@@ -2068,7 +2047,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               </Text>
               <div className="section-copy">
                 <Text variant="body-sm-normal" color="secondary">
-                  Fleets are grouped only when every pipeline and route definition matches, the same functions are present,
+                  Fleets are grouped only when every pipeline and route definition matches
                   and every lookup file has the same size (rows, descriptions and tags are not compared). Fleets whose contents
                   could not be fully read are listed on their own and not compared.
                 </Text>
@@ -2116,7 +2095,14 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                         </div>
                         <div className="section-copy">
                           <Text variant="body-xs-normal" color="secondary">
-                            {group.comparable ? 'Fleets in this identical group' : 'Fleet'}: {group.usageLocations.map((usageLocation) => usageLocation.fleetName).join(', ')}
+                            {group.comparable ? 'Fleets in this identical group' : 'Fleet'}:{' '}
+                            {group.usageLocations
+                              .map((usageLocation) =>
+                                fleetProducts.length > 1
+                                  ? `${usageLocation.fleetName} (${usageLocation.product === 'edge' ? 'Edge' : 'Stream'})`
+                                  : usageLocation.fleetName,
+                              )
+                              .join(', ')}
                           </Text>
                           {group.notes.map((note) => (
                             <Text key={note} variant="body-xs-normal" color="secondary">
@@ -2314,68 +2300,6 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
 
             <div className="detail-section">
               <Text as="h3" variant="heading-sm">
-                Used by fleets
-              </Text>
-              {inventoriesLoading ? (
-                <SkeletonLoader count={3} />
-              ) : inventoriesError ? (
-                <ErrorState error={inventoriesError} onRetry={retryInventories} />
-              ) : visibleUsageLocations.length > 0 ? (
-                <div className="list-stack" style={{ marginTop: '0.75rem' }}>
-                  {visibleUsageLocations.map((usageLocation) => {
-                    const inventory = packKnowledgeInventories?.get(`${usageLocation.product}:${usageLocation.fleetId}`);
-                    const inventoryLabel = formatInventoryLabel(inventory);
-                    const inventoryGap = describeInventoryGap(inventory);
-                    const selectedInventory = selectedUsageLocation
-                      ? packKnowledgeInventories?.get(`${selectedUsageLocation.product}:${selectedUsageLocation.fleetId}`)
-                      : undefined;
-                    const differsFromSelected =
-                      selectedInventory && !inventoryGap && !describeInventoryGap(selectedInventory)
-                        ? buildInventorySignature(inventory?.objects ?? []) !== buildInventorySignature(selectedInventory.objects)
-                        : false;
-
-                    return (
-                      <div key={`${usageLocation.product}:${usageLocation.fleetId}`} className="detail-card pack-relationship-card">
-                        <div className="list-card-header">
-                          <Text variant="body-sm-semibold">{usageLocation.fleetName}</Text>
-                          <FleetProductBadge product={usageLocation.product} />
-                        </div>
-                        <div className="pill-row" style={{ marginTop: '0.5rem' }}>
-                          <span className="pill pill-subtle">
-                            {usageLocation.status === 'inherited-modified'
-                              ? 'Inherited modified'
-                              : usageLocation.status === 'inherited'
-                                ? 'Inherited'
-                                : usageLocation.status === 'local'
-                                  ? 'Local'
-                                  : 'Usage detected'}
-                          </span>
-                          <span className="pill pill-subtle">{inventoryLabel}</span>
-                          {differsFromSelected ? <span className="pill pack-version-pill">Content differs</span> : null}
-                          {inventoryGap ? (
-                            <span className="pill pack-version-pill" title={inventoryGap}>
-                              Not compared
-                            </span>
-                          ) : null}
-                          {inventory?.readFromGroupId ? (
-                            <span className="pill pill-subtle">Read from {inventory.readFromGroupId}</span>
-                          ) : null}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="section-copy">
-                  <Text variant="body-sm-normal" color="secondary">
-                    No fleet usage matched the current product filter.
-                  </Text>
-                </div>
-              )}
-            </div>
-
-            <div className="detail-section">
-              <Text as="h3" variant="heading-sm">
                 Referenced packs
               </Text>
               <PackReferenceList
@@ -2460,7 +2384,12 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                 </div>
               </div>
 
-              {koLoading ? (
+              {needsFleetSelection ? (
+                <EmptyState
+                  title="Select a fleet"
+                  description="Choose the fleet you want to inspect. Knowledge objects are shown as deployed in that fleet."
+                />
+              ) : koLoading ? (
                 <SkeletonLoader count={3} />
               ) : knowledgeError ? (
                 <ErrorState error={knowledgeError} onRetry={retryKnowledge} />
@@ -2501,7 +2430,7 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
               ) : (
                 <EmptyState
                   title="No knowledge objects found"
-                  description="This pack did not return lookups, pipelines, routes, or functions."
+                  description="This pack did not return lookups, pipelines, or routes."
                 />
               )}
             </div>
@@ -2735,210 +2664,6 @@ function formatInventoryLabel(inventory: PackKnowledgeInventory | undefined): st
     .sort((left, right) => left[0].localeCompare(right[0]))
     .map(([type, count]) => `${count} ${type}${count === 1 ? '' : 's'}`)
     .join(', ');
-}
-
-function buildPackSankeyLayout(
-  packs: PackRelationshipSummary[],
-  productFilter: FleetProductFilter,
-): PackSankeyLayout {
-  const fleetNodes = new Map<string, PackSankeyNode>();
-  const packNodes = new Map<string, PackSankeyNode>();
-  const referenceNodes = new Map<string, PackSankeyNode>();
-  const links: PackSankeyLink[] = [];
-
-  packs.forEach((pack) => {
-    const packKey = `pack:${pack.id.toLowerCase()}`;
-    packNodes.set(packKey, {
-      key: packKey,
-      column: 'packs',
-      label: pack.displayName ?? pack.id,
-      subtitle: `${filterUsageLocationsByProduct(pack.usageLocations, productFilter).length} fleet use${filterUsageLocationsByProduct(pack.usageLocations, productFilter).length === 1 ? '' : 's'}`,
-      x: 0,
-      y: 0,
-      width: PACK_SANKEY_COLUMN_WIDTH,
-      height: PACK_SANKEY_NODE_HEIGHT,
-      packId: pack.id,
-    });
-
-    filterUsageLocationsByProduct(pack.usageLocations, productFilter).forEach((usageLocation) => {
-      const fleetKey = `fleet:${usageLocation.product}:${usageLocation.fleetId}`;
-
-      if (!fleetNodes.has(fleetKey)) {
-        fleetNodes.set(fleetKey, {
-          key: fleetKey,
-          column: 'fleets',
-          label: usageLocation.fleetName,
-          subtitle: usageLocation.product === 'stream' ? 'Stream fleet' : 'Edge fleet',
-          x: 0,
-          y: 0,
-          width: PACK_SANKEY_COLUMN_WIDTH,
-          height: PACK_SANKEY_NODE_HEIGHT,
-        });
-      }
-
-      links.push({
-        key: `${fleetKey}->${packKey}`,
-        path: '',
-        title: `${usageLocation.fleetName} uses ${pack.displayName ?? pack.id}`,
-        kind: 'usage',
-      });
-    });
-
-    pack.references.forEach((reference) => {
-      const referenceKey = `reference:${reference.packId.toLowerCase()}`;
-
-      if (!referenceNodes.has(referenceKey)) {
-        referenceNodes.set(referenceKey, {
-          key: referenceKey,
-          column: 'references',
-          label: reference.packDisplayName,
-          subtitle: reference.exists ? 'Referenced pack' : 'Unresolved reference',
-          x: 0,
-          y: 0,
-          width: PACK_SANKEY_COLUMN_WIDTH,
-          height: PACK_SANKEY_NODE_HEIGHT,
-          packId: reference.exists ? reference.packId : undefined,
-        });
-      }
-
-      links.push({
-        key: `${packKey}->${referenceKey}`,
-        path: '',
-        title: `${pack.displayName ?? pack.id} references ${reference.packDisplayName}`,
-        kind: 'reference',
-      });
-    });
-  });
-
-  const columns = [
-    Array.from(fleetNodes.values()).sort((left, right) => left.label.localeCompare(right.label)),
-    Array.from(packNodes.values()).sort((left, right) => left.label.localeCompare(right.label)),
-    Array.from(referenceNodes.values()).sort((left, right) => left.label.localeCompare(right.label)),
-  ];
-
-  columns.forEach((column, columnIndex) => {
-    column.forEach((node, rowIndex) => {
-      node.x = PACK_SANKEY_PADDING + columnIndex * (PACK_SANKEY_COLUMN_WIDTH + PACK_SANKEY_COLUMN_GAP);
-      node.y = PACK_SANKEY_PADDING + rowIndex * (PACK_SANKEY_NODE_HEIGHT + PACK_SANKEY_NODE_GAP);
-    });
-  });
-
-  const nodeLookup = new Map(columns.flat().map((node) => [node.key, node]));
-
-  links.forEach((link) => {
-    const [sourceKey, targetKey] = link.key.split('->');
-    const sourceNode = nodeLookup.get(sourceKey);
-    const targetNode = nodeLookup.get(targetKey);
-
-    if (!sourceNode || !targetNode) {
-      return;
-    }
-
-    const sourceX = sourceNode.x + sourceNode.width;
-    const sourceY = sourceNode.y + sourceNode.height / 2;
-    const targetX = targetNode.x;
-    const targetY = targetNode.y + targetNode.height / 2;
-    const controlOffset = Math.max((targetX - sourceX) * 0.42, 32);
-    link.path = `M ${sourceX} ${sourceY} C ${sourceX + controlOffset} ${sourceY}, ${targetX - controlOffset} ${targetY}, ${targetX} ${targetY}`;
-  });
-
-  const tallestColumn = columns.reduce((currentMax, column) => Math.max(currentMax, column.length), 1);
-
-  return {
-    nodes: columns.flat(),
-    links: links.filter((link) => link.path.length > 0),
-    width: PACK_SANKEY_PADDING * 2 + 3 * PACK_SANKEY_COLUMN_WIDTH + 2 * PACK_SANKEY_COLUMN_GAP,
-    height:
-      PACK_SANKEY_PADDING * 2 +
-      tallestColumn * PACK_SANKEY_NODE_HEIGHT +
-      Math.max(tallestColumn - 1, 0) * PACK_SANKEY_NODE_GAP,
-  };
-}
-
-function PackRelationshipSankeyChart({
-  layout,
-  selectedPackId,
-  onSelectPack,
-}: {
-  layout: PackSankeyLayout;
-  selectedPackId: string | null;
-  onSelectPack: (packId: string) => void;
-}) {
-  return (
-    <div className="inheritance-sankey-shell">
-      <div className="inheritance-sankey-caption">
-        <Text variant="body-sm-normal" color="secondary">
-          Flows show which fleets use each pack and which other packs that pack references.
-        </Text>
-      </div>
-
-      <div className="inheritance-sankey-scroll">
-        <svg
-          className="inheritance-sankey-svg pack-sankey-svg"
-          width={layout.width}
-          height={layout.height}
-          viewBox={`0 0 ${layout.width} ${layout.height}`}
-          role="img"
-          aria-label="Pack relationship Sankey chart"
-          preserveAspectRatio="xMinYMin meet"
-        >
-          {layout.links.map((link) => (
-            <path
-              key={link.key}
-              d={link.path}
-              className={`inheritance-sankey-link${link.kind === 'reference' ? ' pack-sankey-link-reference' : ''}`}
-            >
-              <title>{link.title}</title>
-            </path>
-          ))}
-
-          {layout.nodes.map((node) => {
-            const isSelected = node.packId === selectedPackId && node.column === 'packs';
-            const interactive = Boolean(node.packId && node.column === 'packs');
-
-            return (
-              <g
-                key={node.key}
-                transform={`translate(${node.x}, ${node.y})`}
-                className={interactive ? 'pack-sankey-node-interactive' : ''}
-                role={interactive ? 'button' : undefined}
-                tabIndex={interactive ? 0 : undefined}
-                onClick={interactive ? () => onSelectPack(node.packId!) : undefined}
-                onKeyDown={interactive ? (event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault();
-                    onSelectPack(node.packId!);
-                  }
-                } : undefined}
-              >
-                <rect
-                  className={`inheritance-sankey-node${isSelected ? ' pack-sankey-node-selected' : ''}`}
-                  width={node.width}
-                  height={node.height}
-                  rx="14"
-                  ry="14"
-                />
-                <rect
-                  className={`inheritance-sankey-node-accent${node.column === 'references' ? ' pack-sankey-node-reference-accent' : ''}`}
-                  width="8"
-                  height={node.height}
-                  rx="14"
-                  ry="14"
-                />
-                <text x="18" y="26" className="inheritance-sankey-node-title">
-                  {node.label}
-                </text>
-                <text x="18" y="48" className="inheritance-sankey-node-meta">
-                  {node.subtitle}
-                </text>
-                <title>{node.label}</title>
-              </g>
-            );
-          })}
-        </svg>
-      </div>
-    </div>
-  );
 }
 
 function PackReferenceList({ references, emptyText }: { references: PackReference[]; emptyText: string }) {
@@ -3262,26 +2987,22 @@ function KnowledgeObjectPreviewPanel({
               ? `Selected fleets get a copy of the whole file as saved on ${fleetLabel}.`
               : `Selected fleets get the same ${preview?.kind ?? 'definition'} as saved on ${fleetLabel}.`}
           </Text>
-          {otherFleets.map((fleet) => (
-            <label key={fleet.groupId} className="list-card-header" style={{ justifyContent: 'flex-start', gap: '0.5rem' }}>
-              <input
-                type="checkbox"
-                checked={alsoApplyGroupIds.includes(fleet.groupId)}
-                disabled={fleet.missing}
-                onChange={(event) => {
-                  const { checked } = event.target;
-                  setIsConfirming(false);
-                  setAlsoApplyGroupIds((current) =>
-                    checked ? [...current, fleet.groupId] : current.filter((candidate) => candidate !== fleet.groupId),
-                  );
-                }}
-              />
-              <Text variant="body-xs-normal">
-                {fleet.label}
-                {fleet.missing ? ' (this fleet has no such object)' : ''}
-              </Text>
-            </label>
-          ))}
+          <FleetTransferList
+            options={otherFleets.map((fleet) => ({
+              id: fleet.groupId,
+              label: fleet.label,
+              product: fleet.product,
+              disabledReason: fleet.missing ? 'This fleet has no such object' : undefined,
+              detail: () => (fleet.inheritedBy.length > 0 ? `Also inherited by: ${fleet.inheritedBy.join(', ')}` : ''),
+            }))}
+            selectedIds={alsoApplyGroupIds}
+            onChange={(groupIds) => {
+              setIsConfirming(false);
+              setAlsoApplyGroupIds(groupIds);
+            }}
+            disabled={isSaving}
+            chosenTitle="Also apply to"
+          />
         </fieldset>
       ) : null}
 

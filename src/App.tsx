@@ -1,17 +1,19 @@
 import { Alert, Text } from '@capra/core';
 import { BoxArchive, BranchesOutlined, FleetOutlined } from '@capra/icons';
 import { useState } from 'react';
-import { NavLink, Navigate, Route, RouterProvider, Routes, createBrowserRouter } from 'react-router-dom';
+import { Link, NavLink, Navigate, Route, RouterProvider, Routes, createBrowserRouter } from 'react-router-dom';
 import { hasCriblApiUrl } from './api';
+import { AppIcon } from './components/AppIcon';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { FleetsView } from './components/FleetsView';
+import { HomeView } from './components/HomeView';
 import { InheritanceView } from './components/InheritanceView';
 import { PacksView } from './components/PacksView';
 import './App.css';
 
 function NavigationTabs() {
   const tabs = [
-    { path: '/', label: 'Fleets', Icon: FleetOutlined },
+    { path: '/fleets', label: 'Fleets', Icon: FleetOutlined },
     { path: '/packs', label: 'Packs', Icon: BoxArchive },
     { path: '/inheritance', label: 'Inheritance', Icon: BranchesOutlined },
   ];
@@ -22,7 +24,6 @@ function NavigationTabs() {
         <NavLink
           key={path}
           to={path}
-          end={path === '/'}
           className={({ isActive }) => `nav-tab${isActive ? ' nav-tab-active' : ''}`}
         >
           <Icon size="sm" />
@@ -40,9 +41,9 @@ function AppContent() {
     <div className="app-container">
       <header className="app-header">
         <div className="app-header-title">
-          <div className="app-header-icon" aria-hidden="true">
-            <BoxArchive size="md" />
-          </div>
+          <Link to="/" className="app-header-icon" aria-label="Home" title="Home">
+            <AppIcon size={36} />
+          </Link>
           <div>
             <Text as="h1" variant="heading-lg">
               Fleet Inheritance Manager
@@ -69,7 +70,8 @@ function AppContent() {
       <main className="app-main">
         <ErrorBoundary>
           <Routes>
-            <Route path="/" element={<FleetsView />} />
+            <Route path="/" element={<HomeView />} />
+            <Route path="/fleets" element={<FleetsView />} />
             <Route path="/packs" element={<PacksView layout="action-bar" />} />
             <Route path="/packs-preview" element={<Navigate to="/packs" replace />} />
             <Route path="/inheritance" element={<InheritanceView />} />

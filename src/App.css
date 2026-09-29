@@ -56,6 +56,107 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: 8px;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.app-header-icon:hover {
+  transform: scale(1.06);
+}
+
+.app-header-icon:focus-visible {
+  outline: 2px solid var(--ds-accent);
+  outline-offset: 2px;
+}
+
+.home-view {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  max-width: 72rem;
+}
+
+.home-hero {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.home-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+}
+
+.home-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.2s ease;
+}
+
+.home-card:hover,
+.home-card:focus-visible {
+  border-color: var(--ds-accent);
+}
+
+.home-card-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.home-feature-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 1rem 1.5rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.home-feature-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.home-steps,
+.home-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 1rem 0 0;
+  padding-left: 1.5rem;
+}
+
+.home-table-wrapper {
+  margin-top: 1rem;
+  overflow-x: auto;
+}
+
+.home-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.home-table th,
+.home-table td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--ds-border-neutral);
+  text-align: left;
+  vertical-align: top;
+}
+
+.home-table th {
+  font-weight: 600;
+}
+
+.home-table code {
+  word-break: break-word;
 }
 
 .app-subtitle,
@@ -328,6 +429,15 @@ body {
 
 .fleet-transfer-item:hover {
   background: var(--ds-background-neutral);
+}
+
+.fleet-transfer-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.fleet-transfer-item:disabled:hover {
+  background: none;
 }
 
 .fleet-transfer-item-highlighted {
@@ -700,28 +810,6 @@ body {
   background:
     linear-gradient(135deg, rgba(26, 115, 232, 0.08), transparent 65%),
     var(--ds-background);
-}
-
-.pack-sankey-link-reference {
-  stroke: rgba(0, 0, 0, 0.2);
-  stroke-dasharray: 10 8;
-}
-
-.dark .pack-sankey-link-reference {
-  stroke: rgba(255, 255, 255, 0.2);
-}
-
-.pack-sankey-node-selected {
-  stroke: var(--ds-accent);
-  stroke-width: 2;
-}
-
-.pack-sankey-node-reference-accent {
-  opacity: 0.42;
-}
-
-.pack-sankey-node-interactive {
-  cursor: pointer;
 }
 
 .pack-version-pill {

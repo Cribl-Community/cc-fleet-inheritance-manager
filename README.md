@@ -1,22 +1,25 @@
 # Fleet Inheritance Manager
 
-A Cribl App for visualizing and managing fleet pack inheritance relationships.
+A Cribl App for visualizing fleet and pack inheritance, finding fleets whose pack contents have drifted, and bringing them back in sync.
 
 ## Summary
 
-Fleet Inheritance Manager helps Cribl administrators understand how packs are inherited across their fleet infrastructure. It provides clear visibility into both Stream and Edge fleets, which packs are deployed to them, and what knowledge objects (pipelines, routes, functions, etc.) are contained within those packs.
+Fleet Inheritance Manager helps Cribl administrators understand how packs flow through their Stream and Edge fleet hierarchy. It shows which fleets run each pack, whether a fleet's copy is local, inherited, or locally modified, and which fleets have pack contents (pipelines, routes, and lookups) that differ from the rest. From the same place you can edit pack contents and metadata, copy contents between fleets, and commit and deploy the result.
 
 ## What This App Does
 
-Provide visibility into pack inheritance across Fleets and help administrators understand which packs and knowledge objects are inherited by each Fleet.
-
 ### Key capabilities
 
-- **Fleet Inventory View** — Display all configured Stream and Edge fleets with detailed metadata
-- **Pack Explorer** — Browse all available packs with version, author, and tag information
-- **Inheritance Hierarchy** — Visualize the complete inheritance chain from Fleets → Packs → Knowledge Objects
-- **Search and Filter** — Quickly find specific fleets or packs across your environment
-- **Knowledge Object Catalog** — View all functions, pipelines, routes, and other knowledge objects within each pack
+- **Home screen** — In-app guide with features, a how-to workflow, and the full permission list. Select the app icon in the header to return to it at any time.
+- **Fleet hierarchy** — Expandable parent/child tree of Stream and Edge fleets with product filters, search, and fleet details (type, deployed version, last deploy and config update).
+- **Pack explorer** — Search packs by name, ID, description, tags, or fleet, then choose the fleet to work in.
+- **Content-identical grouping** — Fleets running a pack are grouped when their pipelines and routes match and their lookup files are the same size. Each group lists exactly what differs, and fleets that could not be fully read are shown separately.
+- **Make identical** — Copy pipelines, routes, and lookup files from a reference fleet so a drifting fleet matches it again.
+- **Knowledge object editing** — Edit pipeline definitions, route entries, and lookup rows inline, and optionally apply the same change to other fleets.
+- **Pack metadata publishing** — Edit display name, description, author, and tags, then publish a new version to one or many fleets. All published fleets share one version number.
+- **Commit and deploy** — Commit pending pack changes and deploy them to the affected fleets, with per-fleet results and retry for failures.
+- **Inheritance charts** — Detailed tree, levels, lineage, and Sankey views of the fleet hierarchy, with per-fleet pack status (local, inherited, inherited and modified).
+- **Safe by default** — Every change needs an explicit click and a confirmation that names the affected fleets, and unsaved edits are guarded when leaving the Packs page.
 
 ### Intended users
 
@@ -27,49 +30,50 @@ Provide visibility into pack inheritance across Fleets and help administrators u
 
 ### Works with
 
-- Cribl Stream (4.18.0+)
+- Cribl Stream and Cribl Edge fleets (4.18.0+)
 
 ## When To Use This App
 
 Use Fleet Inheritance Manager when you need to:
 
-- Understand which packs are deployed to which fleets
-- Determine the scope of a pack update or deletion
-- Plan changes to fleet configuration
-- Audit pack dependencies and relationships
-- Document pack inheritance for compliance
+- Understand which packs are deployed to which fleets, and where each fleet inherits them from
+- Find fleets whose copy of a pack has drifted from the others
+- Bring drifting fleets back in line without re-uploading packs by hand
+- Make the same pipeline, route, or lookup change across several fleets
+- Update pack metadata and roll a new version out to many fleets at once
+- Audit pack inheritance before planning a change
 
 ## Before You Install
 
 ### Requirements
 
 - **Required Cribl product**: Cribl Stream / Edge 4.18.0 or later
-- **Required permissions**: Read-only access to groups, packs, and knowledge objects
-- **Supported deployment types**: Leader/standalone deployments
+- **Required permissions**: The app declares the Cribl API permissions listed under [Permissions](#permissions). They include write access to packs, pack contents, version control, and deploy, which the app only uses after you confirm an action.
+- **Supported deployment types**: Distributed deployments with a Leader and one or more fleets
 
 ### No external systems or APIs required
 
-This app only communicates with your local Cribl Stream instance via documented APIs.
+This app only communicates with your Cribl Leader through documented Cribl APIs.
 
 ## Installation
 
 ### Install From Marketplace (Recommended)
 
-1. Go to **Apps** in your Cribl Stream Leader or standalone deployment
+1. Go to **Apps** in your Cribl Leader
 2. Select **Marketplace**
 3. Search for "Fleet Inheritance Manager"
-4. Click **Install** and complete setup
+4. Click **Install**, review the declared permissions, and complete setup
+5. Share the app with the users or teams who should manage fleet packs
 
 ### If Not In Marketplace
 
-1. Visit the GitHub releases page
-2. Download the latest `.tgz` file
-3. In Cribl, go to **Apps** → **Import from file**
-4. Upload the `.tgz` and complete installation
+1. Download the latest `.tgz` package for the app
+2. In Cribl, go to **Apps** → **Import from file**
+3. Upload the `.tgz`, review the declared permissions, and complete installation
 
 ## Configuration
 
-This app is **read-only** and requires no configuration after installation. Simply install and open it to begin exploring your fleet inheritance.
+The app requires no configuration after installation. Open it and start from the home screen.
 
 | Setting | Required | Description | Example | Scope |
 |---|---|---|---|---|
@@ -79,42 +83,54 @@ This app is **read-only** and requires no configuration after installation. Simp
 
 ### Typical Workflow
 
-1. **Open the app** from the Apps page
-2. **Navigate to Fleets** tab to see all configured fleets
-3. **Select a fleet** to view its details and configuration
-4. **Navigate to Packs** tab to browse all available packs
-5. **Navigate to Inheritance** tab to visualize the complete pack inheritance hierarchy
-6. **Use search and filters** to find specific fleets or packs
+1. **Open the app** from the Apps page. The home screen summarizes features, workflow, and permissions.
+2. **Fleets** — Confirm all expected Stream and Edge fleets are visible and review the hierarchy.
+3. **Packs** — Pick a pack, then pick the fleet you want to work in. Pack contents load only after a fleet is selected.
+4. **Review content groups** — See which fleets have identical pack contents and what differs in the others.
+5. **Fix drift** — Use **Make identical to** on a drifting group, or open a pipeline, route, or lookup to edit it directly. Use **Also apply to** to repeat an edit on other fleets.
+6. **Publish metadata** (optional) — Edit pack metadata and publish. The confirmation lists every fleet and the version bump.
+7. **Commit and deploy** — Push the changes out to fleets. Child fleets that inherit a pack update after the deploy.
+8. **Inheritance** — Verify each fleet shows the expected local or inherited pack status.
 
 ### First-Run Checklist
 
-- [ ] Verify you can see all expected fleets in the **Fleets** tab
-- [ ] Confirm packs are loading in the **Packs** tab
-- [ ] Test the **Inheritance** view by expanding a fleet to see its packs
+- [ ] The home screen opens and the app icon returns you to it from any tab
+- [ ] All expected fleets appear in the **Fleets** tab
+- [ ] Packs load in the **Packs** tab and contents appear after selecting a fleet
+- [ ] The **Inheritance** tab shows your fleet hierarchy
 
 ## Permissions
 
-This app is **read-only**. It does not modify any configuration or data.
+The app declares the Cribl API permissions below in `config/policies.yml`. When an admin shares the app, these are granted for requests made through the app. Browsing only uses `GET`. Every write requires an explicit action and a confirmation that names the affected fleets.
 
-### Cribl API Endpoints Used
+### Declared Cribl API Permissions
 
-| Method | Endpoint | Purpose |
+| Area | API paths | Methods | Used for |
+|---|---|---|---|
+| Fleets | `/products/stream/groups`, `/products/stream/groups/*`, `/products/edge/groups`, `/products/edge/groups/*` | GET | List fleets and read fleet details and hierarchy |
+| Packs | `/packs`, `/packs/*` | GET, PUT, PATCH, DELETE | Read packs, upload edited pack archives, and upgrade packs |
+| Fleet packs | `/m/:gid/packs`, `/m/:gid/packs/*` | GET, PUT, POST, PATCH, DELETE | Read, upload, reinstall, and upgrade a pack within a specific fleet |
+| Pack export | `/packs/*/export`, `/m/:gid/packs/*/export` | GET | Export a pack, including local changes, before republishing or copying it |
+| Pack contents | `/p/*`, `/m/:gid/p/*` | GET, PATCH, POST | Read and edit pipelines, routes, and lookups; add a pipeline a fleet is missing |
+| Version control | `/version/status`, `/version/commit` | GET, POST | Check for pending changes and commit them |
+| Deploy | `/products/stream/groups/*/deploy`, `/products/edge/groups/*/deploy`, `/master/groups/*/deploy` | PATCH | Deploy committed changes to fleets |
+
+### Write Operations
+
+| Action in the app | Method and endpoint | Confirmation |
 |---|---|---|
-| GET | `/products/stream/groups` | List Stream Fleet Groups |
-| GET | `/products/stream/groups/{id}` | Get Stream Fleet details and pack relationships |
-| GET | `/products/edge/groups` | List Edge Fleet Groups |
-| GET | `/products/edge/groups/{id}` | Get Edge Fleet details and pack relationships |
-| GET | `/packs` | List all Packs in the environment |
-| GET | `/packs/{id}` | Get Pack metadata and details |
-| GET | `/p/{pack}/functions` | Get Functions within a Pack |
-| GET | `/p/{pack}/pipelines` | Get Pipelines within a Pack |
-| GET | `/p/{pack}/routes` | Get Routes within a Pack |
+| Publish pack metadata | `PUT /m/{fleet}/packs` (upload) then `PATCH /m/{fleet}/packs/{pack}` | Yes, lists fleets and version |
+| Make identical / copy contents | `POST /m/{fleet}/packs` (force reinstall), or `PATCH`/`POST` on `/m/{fleet}/p/{pack}/pipelines`, `/routes`, and `/system/lookups` | Yes, names source and target fleets |
+| Edit a pipeline or route | `PATCH /m/{fleet}/p/{pack}/pipelines/{id}` or `/routes/{table}` | Yes |
+| Edit lookup rows | `PATCH /m/{fleet}/p/{pack}/system/lookups/{id}/content` (falls back to rewriting the lookup file) | Yes |
+| Commit | `POST /version/commit` | Yes |
+| Deploy | `PATCH /products/{stream,edge}/groups/{fleet}/deploy` or `/master/groups/{fleet}/deploy` | Yes |
 
-All calls are read-only (`GET`). No configuration is created, modified, or deleted.
+The app never deletes packs, fleets, or knowledge objects. Lookup rows are only removed when you delete them in the lookup editor and confirm.
 
 ## External API Access
 
-This app makes **no external API calls**. It only communicates with your local Cribl Stream instance.
+This app makes **no external API calls**. It only communicates with your Cribl Leader.
 
 ### Default Configuration
 
@@ -123,63 +139,70 @@ This app makes **no external API calls**. It only communicates with your local C
 
 ## Data and Storage
 
-This app stores **no persistent data**. All information is fetched on-demand from your Cribl Stream instance.
+This app stores **no persistent data**. All information is fetched on demand from your Cribl Leader.
 
 - **No KV store usage**
 - **No persistent cache**
 - **No user data collected**
 - **No session data persisted**
 
-Each time you refresh the app, it fetches current data from your Cribl Stream Leader.
+Each time a view loads, it reads current data from the Leader. Changes you make are written to Cribl configuration, not to the app.
 
 ## Support
 
-This app is built by [Author Name/Team] and is community-supported.
-
-For issues, feature requests, or questions:
-- **GitHub Issues**: [Repository URL]/issues
-- **Email**: [Contact Email]
+This app is built by Nate Wood and is community-supported.
 
 ## Known Limitations
 
-- **Knowledge Objects**: Currently displays Functions, Pipelines, and Routes. Other object types may be added in future releases.
-- **Large Environments**: Performance may degrade with very large numbers of fleets (100+) or packs (500+). Pagination/virtualization improvements planned.
-- **Real-time Updates**: The app does not automatically refresh when fleet or pack configuration changes in the leader. Refresh the app to see latest data.
+- **Knowledge objects**: The app shows and compares pipelines, routes, and lookups. Pack functions and other object types are not shown.
+- **Lookup comparison**: Lookup files are compared by file size only. Rows, descriptions, and tags are not compared.
+- **Inherited packs**: A child fleet that inherits a pack from its parent cannot be exported on its own. Its contents are read from the parent, and it updates only after the parent's changes are committed and deployed.
+- **Large environments**: Performance may degrade with very large numbers of fleets (100+) or packs (500+).
+- **Real-time updates**: The app does not refresh automatically when configuration changes on the Leader. Reload the view to see the latest data.
 
 ## Troubleshooting
 
 ### The App Opens But Shows No Fleets
 
 **Possible causes:**
-- No Stream or Edge fleets are configured in your Cribl instance
-- Missing permissions to read the `/products/stream/groups` or `/products/edge/groups` APIs
+- No Stream or Edge fleets are configured
+- The app was not shared with you by an admin, so its declared permissions are not granted
 
 **Solution:**
-- Verify you have Stream or Edge fleets configured in Cribl
-- Check that your user role has read access to groups and fleets
-- Try refreshing the app
+- Verify Stream or Edge fleets exist on the Leader
+- Ask an admin to share the app with you
+- Reload the app
 
-### Packs or Knowledge Objects Don't Show
+### Packs or Pack Contents Don't Show
 
 **Possible causes:**
-- Packs not deployed to your environment
-- API timeout on large environments
-- Missing permissions to read pack APIs
+- No fleet is selected in the Packs tab yet
+- The pack is not installed on any fleet
+- A request timed out in a large environment
 
 **Solution:**
-- Verify packs exist in your Cribl Stream environment
-- Try searching for specific packs instead of loading all
-- Check your user permissions
+- Select a fleet after selecting a pack
+- Verify the pack exists on at least one fleet
+- Check the error message shown in the panel and retry
+
+### Publish, Copy, or Deploy Fails for Some Fleets
+
+**Possible causes:**
+- The fleet inherits the pack from a parent and has no copy of its own
+- The fleet was changed by someone else since the view loaded
+
+**Solution:**
+- Review the per-fleet results and use retry for failed fleets
+- For inheriting child fleets, change the parent fleet, then commit and deploy
 
 ### The App Won't Load
 
 **Possible causes:**
-- Incompatible Cribl Stream version
+- Cribl version older than 4.18.0
 - Browser compatibility issue
-- Missing required permissions
 
 **Solution:**
-- Verify you're running Cribl Stream 4.18.0 or later
+- Verify you're running Cribl Stream / Edge 4.18.0 or later
 - Try a different browser (Chrome, Firefox, Safari)
 - Check the browser console for error messages
 
@@ -189,10 +212,11 @@ To build and develop this app:
 
 ```bash
 npm install
-npm run dev          # Start dev server with hot reload
-npm run build        # Build for production
-npm run lint         # Run linter
-npm run package      # Create deployable .tgz archive
+npm run dev                  # Start dev server with hot reload
+npm run build                # Type-check and build for production
+node --test src/*.test.ts    # Run unit tests
+npm run lint                 # Run linter
+npm run package              # Bump the patch version and create a deployable .tgz archive
 ```
 
 The app is built with:
@@ -205,29 +229,41 @@ The app is built with:
 
 ```text
 src/
-  main.tsx           ← Entry point
-  App.tsx            ← Main app component with routing
-  types.ts           ← TypeScript type definitions
-  api.ts             ← Cribl API integration
-  hooks.ts           ← React hooks for data fetching
-  App.css            ← Application styling
-  components/        ← React components
-    FleetsView.tsx       ← Fleet inventory view
-    PacksView.tsx        ← Pack explorer
-    InheritanceView.tsx  ← Hierarchy visualization
-    LoadingState.tsx     ← Loading/empty state UI
-    ErrorBoundary.tsx    ← Error handling
+  main.tsx               ← Entry point and theme bridge
+  App.tsx                ← Header, navigation tabs, and routes
+  api.ts                 ← Cribl API integration (read, publish, copy, commit, deploy)
+  hooks.ts               ← React hooks for data fetching
+  types.ts               ← TypeScript type definitions
+  fingerprint.ts         ← Content fingerprints for fleet comparison
+  packArchive.ts         ← Read and rewrite .crbl pack archives
+  lookupCsv.ts           ← Lookup CSV row edits
+  packSource.ts          ← Pack source helpers
+  App.css                ← Application styling
+  *.test.ts              ← Unit tests (node --test)
+  components/
+    HomeView.tsx             ← Home screen (features, how-to, permissions)
+    AppIcon.tsx              ← App logo (links to home)
+    FleetsView.tsx           ← Fleet hierarchy
+    PacksView.tsx            ← Pack comparison, editing, publish, deploy
+    InheritanceView.tsx      ← Inheritance charts
+    KnowledgeObjectGroups.tsx
+    FleetProductBadge.tsx
+    LoadingState.tsx
+    ErrorBoundary.tsx
+
+public/
+  app-icon.svg           ← App icon (browser tab)
 
 config/
-  policies.yml       ← Cribl API permissions
-  proxies.yml        ← External domain declarations
+  policies.yml           ← Cribl API permissions
+  proxies.yml            ← External domain declarations (none)
 ```
 
 ## Versioning and Releases
 
 - Versions follow **semantic versioning** (MAJOR.MINOR.PATCH)
-- Releases are tagged in Git
-- Each release includes a `.tgz` package for installation
+- `npm run package` bumps the patch version; use `-- --minor`, `-- --major`, or `-- --version X.Y.Z` for other bumps
+- Each release is distributed as a `.tgz` package
 
 ## Contributing
 
@@ -236,11 +272,11 @@ Contributions welcome! Please:
 1. Open an issue to discuss proposed changes
 2. Fork and create a feature branch
 3. Submit a pull request with clear description
-4. Ensure tests pass and code is documented
+4. Ensure `npm run build` and `node --test src/*.test.ts` pass
 
 ## License
 
-This app is licensed under the terms in [LICENSE](./LICENSE).
+License terms have not been published yet.
 
 ## App Metadata
 
@@ -251,8 +287,9 @@ This app is licensed under the terms in [LICENSE](./LICENSE).
 | Version | 1.0.0 |
 | Author | Nate Wood |
 | Support Model | community-built |
-| License | [See LICENSE](./LICENSE) |
-| Product Tags | stream |
+| License | Not yet specified |
+| Product Tags | stream, edge |
 | Category | Administration |
 | Audience | admin, platform-owner |
 | Requires External Access | No |
+| Modifies Configuration | Yes, after user confirmation |
