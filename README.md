@@ -67,9 +67,9 @@ This app only communicates with your Cribl Leader through documented Cribl APIs.
 
 ### Install From GitHub
 
-The source and packaged app are published at [github.com/Cribl-Community/fleet-inheritance-manager](https://github.com/Cribl-Community/fleet-inheritance-manager).
+The source and packaged app are published at [github.com/Cribl-Community/cc-fleet-inheritance-manager](https://github.com/Cribl-Community/cc-fleet-inheritance-manager).
 
-1. Download the latest `fleet-inheritance-manager-<version>.tgz` from the repository's [Releases](https://github.com/Cribl-Community/fleet-inheritance-manager/releases) page, or from the `build/` folder of the repository
+1. Download the latest `cc-fleet-inheritance-manager-<version>.tgz` from the repository's [Releases](https://github.com/Cribl-Community/cc-fleet-inheritance-manager/releases) page, or from the `build/` folder of the repository
 2. In Cribl, go to **Apps** → **Import from file**
 3. Upload the `.tgz`, review the declared permissions, and complete installation
 4. Share the app with the users or teams who should manage fleet packs
@@ -77,10 +77,10 @@ The source and packaged app are published at [github.com/Cribl-Community/fleet-i
 ### Build From Source
 
 ```bash
-git clone https://github.com/Cribl-Community/fleet-inheritance-manager.git
-cd fleet-inheritance-manager
+git clone https://github.com/Cribl-Community/cc-fleet-inheritance-manager.git
+cd cc-fleet-inheritance-manager
 npm install
-npm run package    # writes build/fleet-inheritance-manager-<version>.tgz
+npm run package    # writes build/cc-fleet-inheritance-manager-<version>.tgz
 ```
 
 Then import the generated `.tgz` as described above.
@@ -171,7 +171,7 @@ Each time a view loads, it reads current data from the Leader. Changes you make 
 
 This app is built by Nate Wood and is community-supported.
 
-For issues, feature requests, or questions, open an issue at [github.com/Cribl-Community/fleet-inheritance-manager/issues](https://github.com/Cribl-Community/fleet-inheritance-manager/issues).
+For issues, feature requests, or questions, open an issue at [github.com/Cribl-Community/cc-fleet-inheritance-manager/issues](https://github.com/Cribl-Community/cc-fleet-inheritance-manager/issues).
 
 ## Known Limitations
 
@@ -304,8 +304,8 @@ This app is licensed under the [Apache License 2.0](./LICENSE).
 | Field | Value |
 |---|---|
 | App Name | Fleet Inheritance Manager |
-| App ID | fleet-inheritance-manager |
-| Version | 1.0.1 |
+| App ID | cc-fleet-inheritance-manager |
+| Version | 1.0.2 |
 | Author | Nate Wood |
 | Support Model | community-built |
 | License | Apache-2.0 |
