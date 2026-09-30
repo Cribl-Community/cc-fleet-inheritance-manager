@@ -70,6 +70,8 @@ export interface KnowledgeObject {
   schema?: Record<string, unknown>;
   /** Hash of the definition Cribl returned in the list response, used to compare content across fleets. */
   fingerprint?: string;
+  /** Built-in object Cribl does not allow a pack to change (for example the devnull destination). */
+  readOnly?: boolean;
 }
 
 /** Pack contents read from one fleet, with enough detail to know whether a comparison is trustworthy. */

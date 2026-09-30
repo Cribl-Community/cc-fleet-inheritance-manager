@@ -342,14 +342,21 @@ function knowledgeObjectContent(item: ApiRecord, type: KnowledgeObject['type']):
   return item;
 }
 
+/** Built-in destinations that Cribl reports as "read only in Pack context". */
+const BUILT_IN_PACK_OUTPUTS = new Set(['devnull', 'default']);
+
 function mapKnowledgeObject(item: ApiRecord, type: KnowledgeObject['type'], packId: string): KnowledgeObject {
+  const id = readString(item.id) ?? readString(item.name) ?? `${type}-${packId}`;
+  const readOnly = type === 'destination' && (BUILT_IN_PACK_OUTPUTS.has(id) || BUILT_IN_PACK_OUTPUTS.has(readString(item.type) ?? ''));
+
   return {
-    id: readString(item.id) ?? readString(item.name) ?? `${type}-${packId}`,
+    id,
     name: readString(item.name) ?? readString(item.id) ?? `Unnamed ${type}`,
     type,
     description: readString(item.description),
     pack: packId,
     fingerprint: fingerprintContent(knowledgeObjectContent(item, type)),
+    ...(readOnly ? { readOnly } : {}),
   };
 }
 

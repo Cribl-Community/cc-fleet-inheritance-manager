@@ -458,6 +458,32 @@ function isPackIoType(type: string): type is PackIoType {
   return type === 'source' || type === 'destination';
 }
 
+/** Splits a group's differences into what "Make identical" copies, by kind, and what it leaves alone. */
+function planGroupSync(differences: InventoryDifference[]) {
+  const copyable = differences.filter(isCopyableDifference);
+
+  return {
+    pipelines: copyable.filter((difference) => difference.type === 'pipeline'),
+    lookups: copyable.filter((difference) => difference.type === 'lookup'),
+    copyRoutes: copyable.some((difference) => difference.type === 'route'),
+    ioObjects: copyable.filter((difference) => isPackIoType(difference.type)),
+    notCopied: differences.filter((difference) => !isCopyableDifference(difference)),
+  };
+}
+
+function describeGroupSyncPlan(plan: ReturnType<typeof planGroupSync>): string[] {
+  const added = (difference: InventoryDifference) => (difference.kind === 'missing' ? ' (added)' : '');
+
+  return [
+    ...plan.pipelines.map((difference) => `Pipeline ${difference.name}${added(difference)}`),
+    ...(plan.copyRoutes ? ['The whole routing table'] : []),
+    ...plan.lookups.map((difference) => `Lookup ${difference.name} (whole file)`),
+    ...plan.ioObjects.map(
+      (difference) => `${difference.type === 'source' ? 'Source' : 'Destination'} ${difference.name}${added(difference)}`,
+    ),
+  ];
+}
+
 const PACK_IO_SECRET_NOTE =
   'Passwords, tokens, and keys in sources and destinations are copied exactly as stored; re-enter them in the target fleet if they do not work there.';
 
@@ -529,11 +555,11 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
   const [groupSync, setGroupSync] = useState<{
     packId: string;
     groupKey: string;
-    confirming: boolean;
     running: boolean;
     message?: string;
     items: PackPublishResult[];
   } | null>(null);
+  const [syncConfirmGroup, setSyncConfirmGroup] = useState<PackDeploymentGroup | null>(null);
 
   const filteredPacks = useMemo(() => {
     if (!packs) {
@@ -1211,120 +1237,117 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
   const referenceFleet = visibleDeploymentGroups.find((group) => group.comparable)?.usageLocations[0] ?? null;
   const isGroupSyncRunning = Boolean(groupSync?.running);
 
-  const handleCancelGroupSync = useCallback(() => {
-    setGroupSync((current) =>
-      current ? { ...current, confirming: false, message: 'Cancelled. Nothing was changed.' } : current,
-    );
-  }, []);
-
   const handleSyncGroup = useCallback(async (group: PackDeploymentGroup) => {
     if (!selectedPack || !referenceFleet) {
+      if (selectedPack) {
+        setGroupSync({
+          packId: selectedPack.id,
+          groupKey: group.key,
+          running: false,
+          items: [],
+          message: 'No reference fleet is available right now (fleet contents may still be loading), so nothing was copied. Close this and try again.',
+        });
+      }
       return;
     }
 
     const packId = selectedPack.id;
     const referenceInventory = packKnowledgeInventories?.get(`${referenceFleet.product}:${referenceFleet.fleetId}`);
     const sourceGroupId = referenceInventory?.readFromGroupId ?? referenceFleet.fleetId;
-    const copyable = group.differences.filter(isCopyableDifference);
-    const notCopied = group.differences.filter((difference) => !isCopyableDifference(difference));
-    const pipelines = copyable.filter((difference) => difference.type === 'pipeline');
-    const lookups = copyable.filter((difference) => difference.type === 'lookup');
-    const copyRoutes = copyable.some((difference) => difference.type === 'route');
-    const ioObjects = copyable.filter((difference) => isPackIoType(difference.type));
-    const fleetNames = group.usageLocations.map((location) => location.fleetName).join(', ');
+    const { pipelines, lookups, copyRoutes, ioObjects } = planGroupSync(group.differences);
 
-    if (!(groupSync?.packId === packId && groupSync.groupKey === group.key && groupSync.confirming)) {
+    setGroupSync({ packId, groupKey: group.key, running: true, items: [], message: `Copying from ${referenceFleet.fleetName}…` });
+
+    try {
+      const items: PackPublishResult[] = [];
+
+      for (const location of group.usageLocations) {
+        const targetGroupId = location.fleetId;
+        const done: string[] = [];
+        const failed: string[] = [];
+        const skipped: string[] = [];
+        const attempt = async (label: string, action: () => Promise<void>) => {
+          try {
+            await action();
+            done.push(label);
+          } catch (error) {
+            const detail = describeApiError(error);
+            if (/read only in pack context/i.test(detail)) {
+              skipped.push(label);
+            } else {
+              failed.push(`${label}: ${detail}`);
+            }
+          }
+        };
+
+        for (const difference of pipelines) {
+          await attempt(`pipeline ${difference.name}`, () =>
+            copyPackPipelineBetweenGroups(packId, difference.id, sourceGroupId, targetGroupId, difference.kind === 'differs'),
+          );
+        }
+        if (copyRoutes) {
+          await attempt('routing table', () => copyPackRoutesBetweenGroups(packId, sourceGroupId, targetGroupId));
+        }
+        for (const difference of lookups) {
+          await attempt(`lookup ${difference.name}`, () =>
+            copyPackLookupFile(packId, difference.id, sourceGroupId, targetGroupId),
+          );
+        }
+        for (const difference of ioObjects) {
+          await attempt(`${difference.type} ${difference.name}`, () =>
+            copyPackIoObjectBetweenGroups(
+              packId,
+              difference.type as PackIoType,
+              difference.id,
+              sourceGroupId,
+              targetGroupId,
+              difference.kind === 'differs',
+            ),
+          );
+        }
+
+        items.push({
+          groupId: targetGroupId,
+          label: location.fleetName,
+          tone: failed.length === 0 ? 'success' : done.length > 0 ? 'warning' : 'error',
+          message: [
+            done.length > 0 ? `Copied ${done.join(', ')} from ${referenceFleet.fleetName}.` : '',
+            skipped.length > 0 ? `Skipped ${skipped.join(', ')} (built in; Cribl does not let packs change it).` : '',
+            failed.length > 0 ? `Failed: ${failed.join('; ')}` : '',
+          ].filter(Boolean).join(' '),
+        });
+      }
+
+      const anyCopied = items.some((item) => item.tone !== 'error');
       setGroupSync({
         packId,
         groupKey: group.key,
-        confirming: true,
+        running: false,
+        items,
+        message: anyCopied
+          ? 'Saved on the Leader. Use Commit & deploy to roll the changes out to the fleets. The groups refresh to show the result.'
+          : 'Nothing was copied.',
+      });
+
+      if (anyCopied) {
+        handleKnowledgeObjectSaved();
+      }
+    } catch (error) {
+      setGroupSync({
+        packId,
+        groupKey: group.key,
         running: false,
         items: [],
-        message:
-          `This overwrites the following in ${fleetNames} with the copies from ${referenceFleet.fleetName}: ` +
-          `${[
-            ...pipelines.map((difference) => `pipeline ${difference.name}${difference.kind === 'missing' ? ' (added)' : ''}`),
-            ...(copyRoutes ? ['the whole routing table'] : []),
-            ...lookups.map((difference) => `lookup ${difference.name} (whole file)`),
-            ...ioObjects.map((difference) => `${difference.type} ${difference.name}${difference.kind === 'missing' ? ' (added)' : ''}`),
-          ].join(', ')}. ` +
-          `${notCopied.length > 0 ? `Not changed: ${notCopied.map(formatInventoryDifference).join(', ')}. ` : ''}` +
-          `${ioObjects.length > 0 ? `${PACK_IO_SECRET_NOTE} ` : ''}` +
-          'This cannot be undone. Click Confirm overwrite to continue.',
-      });
-      return;
-    }
-
-    setGroupSync({ packId, groupKey: group.key, confirming: false, running: true, items: [], message: `Copying from ${referenceFleet.fleetName}…` });
-
-    const items: PackPublishResult[] = [];
-
-    for (const location of group.usageLocations) {
-      const targetGroupId = location.fleetId;
-      const done: string[] = [];
-      const failed: string[] = [];
-      const attempt = async (label: string, action: () => Promise<void>) => {
-        try {
-          await action();
-          done.push(label);
-        } catch (error) {
-          failed.push(`${label}: ${describeApiError(error)}`);
-        }
-      };
-
-      for (const difference of pipelines) {
-        await attempt(`pipeline ${difference.name}`, () =>
-          copyPackPipelineBetweenGroups(packId, difference.id, sourceGroupId, targetGroupId, difference.kind === 'differs'),
-        );
-      }
-      if (copyRoutes) {
-        await attempt('routing table', () => copyPackRoutesBetweenGroups(packId, sourceGroupId, targetGroupId));
-      }
-      for (const difference of lookups) {
-        await attempt(`lookup ${difference.name}`, () =>
-          copyPackLookupFile(packId, difference.id, sourceGroupId, targetGroupId),
-        );
-      }
-      for (const difference of ioObjects) {
-        await attempt(`${difference.type} ${difference.name}`, () =>
-          copyPackIoObjectBetweenGroups(
-            packId,
-            difference.type as PackIoType,
-            difference.id,
-            sourceGroupId,
-            targetGroupId,
-            difference.kind === 'differs',
-          ),
-        );
-      }
-
-      items.push({
-        groupId: targetGroupId,
-        label: location.fleetName,
-        tone: failed.length === 0 ? 'success' : done.length > 0 ? 'warning' : 'error',
-        message: [
-          done.length > 0 ? `Copied ${done.join(', ')} from ${referenceFleet.fleetName}.` : '',
-          failed.length > 0 ? `Failed: ${failed.join('; ')}` : '',
-        ].filter(Boolean).join(' '),
+        message: `Make identical stopped unexpectedly: ${describeApiError(error)}`,
       });
     }
+  }, [handleKnowledgeObjectSaved, packKnowledgeInventories, referenceFleet, selectedPack]);
 
-    const anyCopied = items.some((item) => item.tone !== 'error');
-    setGroupSync({
-      packId,
-      groupKey: group.key,
-      confirming: false,
-      running: false,
-      items,
-      message: anyCopied
-        ? 'Saved on the Leader. Use Commit & deploy to roll the changes out to the fleets. The groups below refresh to show the result.'
-        : 'Nothing was copied.',
-    });
-
-    if (anyCopied) {
-      handleKnowledgeObjectSaved();
-    }
-  }, [groupSync, handleKnowledgeObjectSaved, packKnowledgeInventories, referenceFleet, selectedPack]);
+  const syncConfirmPlan = syncConfirmGroup ? planGroupSync(syncConfirmGroup.differences) : null;
+  const syncModalStatus =
+    syncConfirmGroup && selectedPack && groupSync?.packId === selectedPack.id && groupSync.groupKey === syncConfirmGroup.key
+      ? groupSync
+      : null;
 
   const buildCopyTargets = (knowledgeObject: KnowledgeObject): KnowledgeObjectCopyTarget[] =>
     publishTargets
@@ -1757,6 +1780,78 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
 
   return (
     <>
+    <Modal
+      isOpen={syncConfirmGroup !== null}
+      title={`Make identical to ${referenceFleet?.fleetName ?? 'the reference fleet'}?`}
+      isDismissible={!isGroupSyncRunning}
+      onClose={() => setSyncConfirmGroup(null)}
+      footer={
+        <Modal.FooterActions>
+          {syncModalStatus && !syncModalStatus.running ? (
+            <Button variant="primary" onClick={() => setSyncConfirmGroup(null)}>
+              Close
+            </Button>
+          ) : (
+            <>
+              <Button variant="tertiary" onClick={() => setSyncConfirmGroup(null)} disabled={isGroupSyncRunning}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  if (syncConfirmGroup) {
+                    void handleSyncGroup(syncConfirmGroup);
+                  }
+                }}
+                pending={isGroupSyncRunning}
+                disabled={isGroupSyncRunning}
+              >
+                Overwrite
+              </Button>
+            </>
+          )}
+        </Modal.FooterActions>
+      }
+    >
+      {syncModalStatus ? (
+        <>
+          {syncModalStatus.message ? (
+            <Text as="p" variant="body-sm-normal" role="status">
+              {syncModalStatus.message}
+            </Text>
+          ) : null}
+          {syncModalStatus.items.length > 0 ? (
+            <PublishResultList items={syncModalStatus.items} label="Make identical results" successLabel="Updated" />
+          ) : null}
+        </>
+      ) : syncConfirmGroup && syncConfirmPlan ? (
+        <>
+          <Text as="p" variant="body-sm-normal">
+            {`This overwrites the following in ${syncConfirmGroup.usageLocations.map((location) => location.fleetName).join(', ')} with the copies from ${referenceFleet?.fleetName ?? 'the reference fleet'}. This cannot be undone:`}
+          </Text>
+          <ul className="pack-leave-reasons">
+            {describeGroupSyncPlan(syncConfirmPlan).map((change) => (
+              <li key={change}>
+                <Text variant="body-sm-normal">{change}</Text>
+              </li>
+            ))}
+          </ul>
+          {syncConfirmPlan.notCopied.length > 0 ? (
+            <Text as="p" variant="body-sm-normal" color="secondary">
+              {`Not changed: ${syncConfirmPlan.notCopied.map(formatInventoryDifference).join(', ')}.`}
+            </Text>
+          ) : null}
+          {syncConfirmPlan.ioObjects.length > 0 ? (
+            <Text as="p" variant="body-sm-normal" color="secondary">
+              {PACK_IO_SECRET_NOTE}
+            </Text>
+          ) : null}
+          <Text as="p" variant="body-sm-normal" color="secondary">
+            Changes are saved on the Leader. Use Commit &amp; deploy afterwards to roll them out to the fleets.
+          </Text>
+        </>
+      ) : null}
+    </Modal>
     {isActionBarLayout ? (
       <Modal
         isOpen={isLeaveModalOpen}
@@ -2144,25 +2239,17 @@ export function PacksView({ layout = 'classic' }: { layout?: PacksViewLayout } =
                         </div>
                         {referenceFleet && group.differences.some(isCopyableDifference) ? (
                           <div className="pill-row" style={{ marginTop: '0.5rem' }}>
-                            {groupSync?.packId === selectedPack.id && groupSync.groupKey === group.key && groupSync.confirming ? (
-                              <>
-                                <Button variant="primary" onClick={() => void handleSyncGroup(group)} disabled={isGroupSyncRunning}>
-                                  Confirm overwrite
-                                </Button>
-                                <Button variant="tertiary" onClick={handleCancelGroupSync} disabled={isGroupSyncRunning}>
-                                  Cancel
-                                </Button>
-                              </>
-                            ) : (
-                              <Button
-                                variant="secondary"
-                                onClick={() => void handleSyncGroup(group)}
-                                pending={isGroupSyncRunning && groupSync?.groupKey === group.key}
-                                disabled={isGroupSyncRunning || isPackBusy || isDeploying}
-                              >
-                                {`Make identical to ${referenceFleet.fleetName}`}
-                              </Button>
-                            )}
+                            <Button
+                              variant="secondary"
+                              onClick={() => {
+                                setGroupSync(null);
+                                setSyncConfirmGroup(group);
+                              }}
+                              pending={isGroupSyncRunning && groupSync?.groupKey === group.key}
+                              disabled={isGroupSyncRunning || isPackBusy || isDeploying}
+                            >
+                              {`Make identical to ${referenceFleet.fleetName}`}
+                            </Button>
                           </div>
                         ) : null}
                       </div>
@@ -2588,14 +2675,15 @@ function describeInventoryDifferences(
   referenceObjects: KnowledgeObject[],
 ): InventoryDifference[] {
   const keyOf = (knowledgeObject: KnowledgeObject) => `${knowledgeObject.type}:${knowledgeObject.id}`;
+  const comparable = (list: KnowledgeObject[]) => list.filter((knowledgeObject) => !knowledgeObject.readOnly);
   const toDifference = (knowledgeObject: KnowledgeObject, kind: InventoryDifference['kind']): InventoryDifference => ({
     type: knowledgeObject.type,
     id: knowledgeObject.id,
     name: knowledgeObject.name,
     kind,
   });
-  const reference = new Map(referenceObjects.map((knowledgeObject) => [keyOf(knowledgeObject), knowledgeObject]));
-  const own = new Map(objects.map((knowledgeObject) => [keyOf(knowledgeObject), knowledgeObject]));
+  const reference = new Map(comparable(referenceObjects).map((knowledgeObject) => [keyOf(knowledgeObject), knowledgeObject]));
+  const own = new Map(comparable(objects).map((knowledgeObject) => [keyOf(knowledgeObject), knowledgeObject]));
   const differences: InventoryDifference[] = [];
 
   own.forEach((knowledgeObject, key) => {
@@ -2658,7 +2746,8 @@ function describeInventoryGap(inventory: PackKnowledgeInventory | undefined): st
 }
 
 function buildInventorySignature(inventory: KnowledgeObject[]): string {
-  const normalized = [...inventory]
+  const normalized = inventory
+    .filter((knowledgeObject) => !knowledgeObject.readOnly)
     .sort((left, right) => `${left.type}:${left.id}`.localeCompare(`${right.type}:${right.id}`))
     .map((knowledgeObject) => `${knowledgeObject.type}:${knowledgeObject.id}:${knowledgeObject.fingerprint ?? ''}`);
 
@@ -2780,7 +2869,8 @@ function KnowledgeObjectPreviewPanel({
     lookupIdIndex >= 0 &&
     preview.lookup.rows.every((row) => row.length === preview.lookup.fields.length);
   const canEdit =
-    preview?.kind === 'pipeline' || preview?.kind === 'route' || preview?.kind === 'source' || preview?.kind === 'destination' || lookupEditable;
+    !knowledgeObject.readOnly &&
+    (preview?.kind === 'pipeline' || preview?.kind === 'route' || preview?.kind === 'source' || preview?.kind === 'destination' || lookupEditable);
 
   const lookupPatches = useMemo((): LookupRowPatch[] => {
     if (preview?.kind !== 'lookup' || !lookupEditable) {
